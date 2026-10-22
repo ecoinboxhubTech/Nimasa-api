@@ -5,7 +5,6 @@ from typing import Iterator
 from sqlalchemy import DateTime, create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import TypeDecorator
 
 
@@ -14,7 +13,7 @@ class Base(DeclarativeBase):
 
 
 class UTCDateTime(TypeDecorator):
-    """Always bind/return aware UTC datetimes, even on SQLite which drops tzinfo."""
+    """Always bind/return aware UTC datetimes, even if the driver returns naive values."""
 
     impl = DateTime(timezone=True)
     cache_ok = True
@@ -38,14 +37,21 @@ engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
 
 
+def normalize_database_url(url: str) -> str:
+    """Hosted providers (Aiven, Heroku, ...) hand out 'postgres://' or 'postgresql://' URIs; SQLAlchemy needs a driver name."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 def init_engine(url: str) -> Engine:
     global engine, SessionLocal
-    kwargs: dict = {"pool_pre_ping": True}
-    if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
-        if url in ("sqlite://", "sqlite:///:memory:"):
-            kwargs["poolclass"] = StaticPool
-    engine = create_engine(url, **kwargs)
+    url = normalize_database_url(url)
+    if not url.startswith("postgresql"):
+        raise ValueError("DATABASE_URL must be a PostgreSQL URL (e.g. your Aiven Service URI). Other databases are not supported.")
+    # pool_pre_ping + pool_recycle: managed Postgres closes idle connections, so stale ones are replaced instead of erroring.
+    engine = create_engine(url, pool_pre_ping=True, pool_recycle=300)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     return engine
 

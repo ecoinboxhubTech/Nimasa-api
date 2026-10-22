@@ -86,10 +86,10 @@ def test_feedback_validation_and_minimisation(client):
     assert client.post("/api/v1/feedback", json={"found_information": "yes_easily", "comments": "clear"}).status_code == 201
 
 
-def test_rate_limit(monkeypatch, tmp_path):
+def test_rate_limit(monkeypatch):
     from fastapi.testclient import TestClient
     from tests.conftest import make_client
-    app = make_client(monkeypatch, tmp_path, RATE_LIMIT_PER_MINUTE="2")
+    app = make_client(monkeypatch, RATE_LIMIT_PER_MINUTE="2")
     with TestClient(app) as c:
         codes = [c.post("/api/v1/feedback", json={"comments": "hi"}).status_code for _ in range(3)]
     assert codes == [201, 201, 429]
@@ -104,20 +104,20 @@ def test_csv_export_has_time_unit_type_and_source(client):
     assert client.get("/api/v1/locations/lekki/series.csv", params={"dataset": "nope"}).status_code == 404
 
 
-def test_public_data_endpoints_are_rate_limited(monkeypatch, tmp_path):
+def test_public_data_endpoints_are_rate_limited(monkeypatch):
     from fastapi.testclient import TestClient
     from tests.conftest import make_client
-    app = make_client(monkeypatch, tmp_path, RATE_LIMIT_PER_MINUTE="2")
+    app = make_client(monkeypatch, RATE_LIMIT_PER_MINUTE="2")
     with TestClient(app) as c:
         codes = [c.get("/api/v1/locations/lekki/summary").status_code for _ in range(3)]
         assert codes == [200, 200, 429]
         assert c.get("/api/v1/health").status_code == 200  # monitors must not be throttled
 
 
-def test_hsts_only_in_production(monkeypatch, tmp_path):
+def test_hsts_only_in_production(monkeypatch):
     from fastapi.testclient import TestClient
     from tests.conftest import make_client
-    with TestClient(make_client(monkeypatch, tmp_path, APP_ENV="production")) as c:
+    with TestClient(make_client(monkeypatch, APP_ENV="production")) as c:
         assert "max-age" in c.get("/api/v1/health").headers["strict-transport-security"]
 
 
@@ -140,10 +140,10 @@ def test_admin_requires_credentials(client):
     assert client.get("/api/v1/admin/feeds", headers={"Authorization": f"Bearer {ADMIN['X-API-Key']}"}).status_code == 200
 
 
-def test_admin_disabled_without_key(monkeypatch, tmp_path):
+def test_admin_disabled_without_key(monkeypatch):
     from fastapi.testclient import TestClient
     from tests.conftest import make_client
-    app = make_client(monkeypatch, tmp_path, ADMIN_API_KEY="")
+    app = make_client(monkeypatch, ADMIN_API_KEY="")
     with TestClient(app) as c:
         assert c.get("/api/v1/admin/feeds", headers=ADMIN).status_code == 503
 
@@ -171,3 +171,10 @@ def test_admin_can_disable_a_source_and_trigger_ingestion(client):
 def test_admin_feeds_and_runs_have_no_secrets(client):
     body = client.get("/api/v1/admin/feeds", headers=ADMIN).text + client.get("/api/v1/admin/ingestion-runs", headers=ADMIN).text
     assert ADMIN["X-API-Key"] not in body
+
+
+def test_hosted_postgres_urls_are_normalised_for_sqlalchemy():
+    from app.db import normalize_database_url as n
+    assert n("postgres://u:p@h.aivencloud.com:1/db?sslmode=require") == "postgresql+psycopg://u:p@h.aivencloud.com:1/db?sslmode=require"
+    assert n("postgresql://u:p@h/db").startswith("postgresql+psycopg://")
+    assert n("postgresql+psycopg://u:p@h/db") == "postgresql+psycopg://u:p@h/db"

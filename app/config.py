@@ -10,9 +10,15 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:5173"
-    database_url: str = "sqlite:///./blueintel.db"
+    database_url: str  # PostgreSQL only (Aiven Service URI). Required: there is no local fallback.
 
-    admin_api_key: str = ""
+    admin_api_key: str = ""  # optional service key for automation; staff sign in with accounts instead
+    admin_bootstrap_email: str = ""  # creates the first administrator when none exist
+    admin_bootstrap_password: str = ""
+    admin_session_hours: int = 8
+    admin_max_failed_logins: int = 5
+    admin_lockout_minutes: int = 15
+    login_rate_limit_per_minute: int = 10
 
     active_source: str = "demo"
     source_licence_reviewed: bool = False

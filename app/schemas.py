@@ -157,6 +157,29 @@ class SourcePatch(BaseModel):
     enabled: bool
 
 
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class LoginIn(BaseModel):
+    email: str = Field(max_length=254, pattern=EMAIL_PATTERN)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class StaffCreate(BaseModel):
+    email: str = Field(max_length=254, pattern=EMAIL_PATTERN)
+    password: str = Field(min_length=12, max_length=200)
+
+
+class StaffPatch(BaseModel):
+    active: bool | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=200)  # admin password reset
+
+
 class DatasetPatch(BaseModel):
     """Freshness threshold per dataset (FR-024). Must be at least one source refresh interval, so fresh data is never flagged stale."""
     stale_after_minutes: int = Field(gt=0, le=60 * 24 * 14)

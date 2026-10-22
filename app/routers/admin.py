@@ -1,14 +1,17 @@
 """Protected operations API (FR-021..024, NFR-006). Every change is audit-logged."""
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db, utcnow
 from app.errors import ApiError
-from app.models import AlertRule, AuditLog, DataSource, Dataset, Feedback, IngestionRun, Location
-from app.schemas import AlertRulePatch, DatasetPatch, SourcePatch
-from app.security import audit, require_admin
+from app.models import (AdminSession, AdminUser, AlertRule, AuditLog, DataSource, Dataset, Feedback, IngestionRun,
+                        Location)
+from app.passwords import hash_password
+from app.routers.auth import user_out
+from app.schemas import AlertRulePatch, DatasetPatch, SourcePatch, StaffCreate, StaffPatch
+from app.security import audit, require_admin, require_staff
 from app.services import ingestion
 from app.services.data import age_minutes, feed_status
 
@@ -100,6 +103,47 @@ def patch_rule(rule_id: str, body: AlertRulePatch, db: Session = Depends(get_db)
 def audit_log(limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
     return [{"at": a.at, "actor": a.actor, "action": a.action, "target": a.target, "before": a.before, "after": a.after}
             for a in db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)).all()]
+
+
+@router.get("/staff")
+def list_staff(db: Session = Depends(get_db), _: AdminUser = Depends(require_staff)):
+    return [user_out(u) for u in db.scalars(select(AdminUser).order_by(AdminUser.email)).all()]
+
+
+@router.post("/staff", status_code=201)
+def create_staff(body: StaffCreate, db: Session = Depends(get_db), me: AdminUser = Depends(require_staff)):
+    email = body.email.strip().lower()
+    if db.scalars(select(AdminUser).where(AdminUser.email == email)).first():
+        raise ApiError(409, "STAFF_EXISTS", "An administrator with that email already exists.")
+    user = AdminUser(email=email, password_hash=hash_password(body.password))
+    db.add(user)
+    audit(db, me.email, "staff.create", email, None, {"active": True})
+    db.commit()
+    return user_out(user)
+
+
+@router.patch("/staff/{staff_id}")
+def patch_staff(staff_id: int, body: StaffPatch, db: Session = Depends(get_db), me: AdminUser = Depends(require_staff)):
+    """Deactivate/reactivate staff or reset a password. Either change signs that person out everywhere."""
+    user = db.get(AdminUser, staff_id)
+    if not user:
+        raise ApiError(404, "STAFF_NOT_FOUND", f"Administrator {staff_id} does not exist.")
+    if body.active is None and body.password is None:
+        raise ApiError(422, "VALIDATION_ERROR", "No changes supplied.")
+    if body.active is False and user.id == me.id:
+        raise ApiError(409, "CANNOT_DEACTIVATE_SELF", "You cannot deactivate your own account.")
+    changes = {}
+    if body.active is not None:
+        changes["active"] = body.active
+        user.active = body.active
+    if body.password is not None:
+        user.password_hash = hash_password(body.password)
+        user.failed_attempts, user.locked_until = 0, None
+        changes["password"] = "reset"
+    db.execute(update(AdminSession).where(AdminSession.user_id == user.id).values(revoked=True))
+    audit(db, me.email, "staff.update", user.email, None, changes)
+    db.commit()
+    return user_out(user)
 
 
 @router.get("/feedback")

@@ -12,7 +12,7 @@ from app import db
 from app.config import Settings, get_settings
 from app.errors import install_error_handlers
 from app.models import Observation  # noqa: F401  (ensures models are registered)
-from app.routers import admin, insights, public
+from app.routers import admin, auth, insights, public
 from app.seed import seed
 from app.services import ingestion
 
@@ -85,6 +85,7 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.include_router(public.router)
     app.include_router(insights.router)
+    app.include_router(auth.router)
     app.include_router(admin.router)
 
     @app.get("/", include_in_schema=False)

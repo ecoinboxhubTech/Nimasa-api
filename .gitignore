@@ -13,9 +13,7 @@ venv/
 .ruff_cache/
 *.egg-info/
 
-# Local databases and logs
-*.db
-*.sqlite3
+# Logs
 *.log
 
 # OS / editor

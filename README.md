@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-50%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-62%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-MVP%20%2F%20pilot--ready-blue)
 
 [Quick start](#-quick-start) · [Endpoints](#-endpoints) · [Architecture](#-architecture) · [AI insights](#-ai-insights-groq) · [SRS coverage](#-srs-coverage)
@@ -37,8 +37,8 @@ FastAPI back-end for BlueIntel Nigeria, built from the *PRD & SRS v1.0*. It inge
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 cp .env.example .env                                   # then edit it (see below)
-uvicorn app.main:app --reload                          # http://localhost:8000/docs
-pytest                                                 # 50 tests, no network needed
+uvicorn app.main:app --reload --port 8015                          # http://localhost:8015/docs
+pytest                                                 # 62 tests, no network needed
 ```
 
 Minimum `.env` edits:
@@ -46,10 +46,63 @@ Minimum `.env` edits:
 | Variable | Why |
 |---|---|
 | `GROQ_API_KEY` | Enables `/insights/query`. Get one at [console.groq.com](https://console.groq.com). Without it only the AI endpoint returns `503 AI_NOT_CONFIGURED`; everything else works (FR-020). |
-| `ADMIN_API_KEY` | Enables `/admin/*`. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Empty means admin is disabled. |
+| `ADMIN_BOOTSTRAP_EMAIL` / `ADMIN_BOOTSTRAP_PASSWORD` | Creates the **first administrator** on startup when none exist (password at least 12 characters). Remove both afterwards and add staff through the API. |
 | `CORS_ORIGINS` | Your front-end origin(s). |
 
-The first start creates the SQLite DB, seeds reference data and runs one ingestion. After that the scheduler runs it every `INGEST_INTERVAL_MINUTES`.
+`ADMIN_API_KEY` is optional: a service key for scripts and automation. It cannot manage staff. Leave it empty to disable it.
+
+## 🗄️ Database (Aiven PostgreSQL)
+
+The same managed Aiven PostgreSQL service is used for local development and production. Nothing else needs installing locally.
+
+1. In the Aiven console, open your PostgreSQL service and copy the **Service URI** from *Overview*.
+2. **Use a separate database for each environment** so local testing never touches production data. In the service's *Databases* tab create `blueintel_dev` and `blueintel_prod`, then replace `defaultdb` in the URI:
+   ```
+   # local .env
+   DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_dev?sslmode=require
+   # production environment variable
+   DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_prod?sslmode=require
+   ```
+   The `postgres://` prefix is converted automatically. Keep `?sslmode=require`.
+3. If your Aiven service restricts IP addresses, add your local machine's and your host's addresses under *Allowed IP addresses*.
+4. Check the connection (the password is never printed):
+   ```bash
+   python -m app.dbcheck
+   # OK  PostgreSQL 16.x, database 'blueintel_dev', TLS: yes
+   ```
+5. Start the API. Tables are created and seeded on first start.
+
+PostgreSQL is the only supported database; there is no local fallback. Keep real credentials in `.env` (git-ignored) or your host's secret store, never in the repo.
+
+### Running the tests
+
+Tests run against PostgreSQL too, in their own database, because **every test starts by dropping all tables**. In the Aiven console create a database named `blueintel_test`, then add its URI to `.env`:
+
+```
+TEST_DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_test?sslmode=require
+```
+
+`pytest` refuses to run unless the database name ends in `_test` and differs from `DATABASE_URL`, so it can never wipe your dev or prod data. Because each test resets the database over the network, the suite takes a few minutes.
+
+## 🔑 Who can do what
+
+| Role | Can | Login |
+|---|---|---|
+| **Public visitor** | View published maps, charts and public alerts. Nothing to register, no password. | **No** |
+| **Administrator** | Manage data sources, alert rules and freshness settings, inspect ingestion failures and **manage staff access** | **Yes** |
+
+```bash
+# Sign in (returns a bearer token valid for ADMIN_SESSION_HOURS, default 8)
+curl -X POST localhost:8015/api/v1/admin/auth/login -H "Content-Type: application/json" \
+     -d '{"email": "you@example.com", "password": "your-password"}'
+
+# Use it
+curl localhost:8015/api/v1/admin/feeds -H "Authorization: Bearer <access_token>"
+```
+
+Passwords are hashed with scrypt, and only a digest of each session token is stored. After `ADMIN_MAX_FAILED_LOGINS` (5) wrong passwords an account locks for `ADMIN_LOCKOUT_MINUTES` (15); login is also rate-limited per IP. Failed logins never reveal whether an email is registered. Deactivating a person or resetting their password signs them out everywhere at once.
+
+The first start creates the tables in your PostgreSQL database, seeds reference data and runs one ingestion. After that the scheduler runs it every `INGEST_INTERVAL_MINUTES`.
 
 ## 📡 Endpoints
 
@@ -68,10 +121,12 @@ All paths are under `/api/v1`. Interactive docs are at `/docs`.
 | `POST /feedback` | Optional pilot feedback (no personal data) | 12.3 |
 | `POST /insights/query` | Groq-grounded Q&A with citations | FR-017–020 |
 
-### Admin (requires `X-API-Key` or `Authorization: Bearer`)
+### Admin (requires `Authorization: Bearer <session token>`)
 
 | Method & path | Purpose | SRS |
 |---|---|---|
+| `POST /admin/auth/login` · `/logout` · `/change-password` · `GET /admin/auth/me` | Staff sign-in and session management (login is the only unauthenticated admin path) | NFR-006 |
+| `GET /admin/staff` · `POST /admin/staff` · `PATCH /admin/staff/{id}` | List, add, deactivate staff or reset a password. **Audited**; needs a staff login, not the service key | NFR-006 |
 | `GET /admin/feeds` · `/ingestion-runs` · `/audit-log` · `/feedback` | Operations views | FR-021/022 |
 | `POST /admin/ingestion/run` | Run ingestion now | |
 | `PATCH /admin/alert-rules/{id}` | Change thresholds. **Audited** | FR-023 |
@@ -93,7 +148,7 @@ flowchart LR
     PUB --> ALERTS[services/alerts.py]
     AI --> INS[services/insights.py<br/>retrieve + guardrails] --> LLM[services/llm.py] --> GROQ[(Groq API)]
     INS --> DB
-    DATA --> DB[(SQL database<br/>SQLite / PostgreSQL)]
+    DATA --> DB[(SQL database<br/>PostgreSQL / Aiven)]
     ALERTS --> DB
     SCHED[APScheduler] --> ING[services/ingestion.py<br/>validate, retry, run log]
     ING --> ADP[services/adapters.py] --> PROV[(Provider<br/>demo / open_meteo)]
@@ -160,16 +215,17 @@ The model is set by `GROQ_MODEL`; check Groq's current model list, as models are
 | Status | Items |
 |---|---|
 | ✅ Implemented | FR-006–015 · FR-011 (server-side CSV) · FR-017–024 · NFR-002/004/005/006/008/011 · NFR-007 (HSTS in production; TLS terminates at the proxy) · security controls in §14.1 |
-| ⏭️ Not implemented | FR-016 (email/SMS/push, optional in the MVP) · user accounts (PRD 14.2: not needed for MVP) |
+| ⏭️ Not implemented | FR-016 (email/SMS/push, optional in the MVP) · public user accounts (PRD 14.2: the public needs no login) |
 
 Notes: FR-024 freshness thresholds are admin-configurable, but the coverage area is set in `seed.py`. Security controls include secrets in env, validated input, parameterised queries, rate limits, admin auth and no secrets in logs.
 
 ## ⚠️ Known limits and next steps
 
-- **Verified:** all 50 tests pass and the server was smoke-tested locally. The Groq client is tested against a mocked HTTP transport, and the Open-Meteo adapter is *not* exercised because tests must not call external services. **Test both with your real key and the live API before relying on them.**
-- **Migrations:** tables are created with `create_all`. Add Alembic before changing the schema in production.
+- **Verified:** all 62 tests pass and the server was smoke-tested locally. The Groq client is tested against a mocked HTTP transport, and the Open-Meteo adapter is *not* exercised because tests must not call external services. **Test both with your real key and the live API before relying on them.**
+- **Migrations:** tables are created with `create_all`, which only creates missing tables and never alters existing ones. Add Alembic before changing the schema on a database that already holds data (such as your Aiven production database).
+- **Aiven backups:** Aiven takes automatic backups; test a restore before launch (NFR-008).
 - **Scaling:** the scheduler and rate limiter run in-process (use one worker). For several instances, run ingestion as a separate job and move the limiter to Redis.
 - **Reverse proxy:** configure forwarded headers so the rate limiter sees real client IPs, and terminate TLS at the proxy (NFR-007).
 - **Backups and monitoring:** use your database host's backups and test a restore before launch (NFR-008). Alert on `/api/v1/health` → `feeds.status != healthy`.
-- **Admin auth** is a single shared key. Replace it with real users and roles if several operators are needed.
+- **Admin auth:** there is one role (administrator) and no self-service password reset or MFA yet. Reset passwords through `PATCH /admin/staff/{id}`. Sessions are stored in the database, so they survive restarts and work across instances.
 - **Placeholders:** alert thresholds are illustrative, and the Lagos coast and three indicators are assumptions pending the PRD §18 decisions.

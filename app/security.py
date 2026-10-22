@@ -4,27 +4,62 @@ import time
 from collections import defaultdict, deque
 from threading import Lock
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Request
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.db import get_db
+from app.db import get_db, utcnow
 from app.errors import ApiError
-from app.models import AuditLog
+from app.models import AdminSession, AdminUser, AuditLog
+from app.passwords import token_digest
 
 
-def require_admin(
-    x_api_key: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
+# Declared as security schemes so Swagger UI (/docs) shows an Authorize button and sends the credential.
+bearer_scheme = HTTPBearer(auto_error=False, description="Session token from POST /api/v1/admin/auth/login")
+api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False, description="Optional service key")
+
+
+def bearer_token(creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> str:
+    return creds.credentials if creds else ""
+
+
+def admin_principal(
+    x_api_key: str | None = Depends(api_key_scheme),
+    bearer: str = Depends(bearer_token),
     settings: Settings = Depends(get_settings),
-) -> str:
-    """Admin routes need ADMIN_API_KEY via 'X-API-Key' or 'Authorization: Bearer'. Returns the actor name."""
-    if not settings.admin_api_key:
-        raise ApiError(503, "ADMIN_DISABLED", "Admin API is disabled (no ADMIN_API_KEY configured).")
-    supplied = x_api_key or (authorization[7:] if authorization and authorization.lower().startswith("bearer ") else "")
-    if not supplied or not hmac.compare_digest(supplied.encode(), settings.admin_api_key.encode()):
-        raise ApiError(401, "UNAUTHORISED", "Missing or invalid admin credentials.")
-    return "admin"
+    db: Session = Depends(get_db),
+) -> tuple[str, AdminUser | None]:
+    """Who is calling an admin route: (actor name, staff account or None for the service key).
+
+    Accepted credentials: a staff session token (from POST /admin/auth/login) as 'Authorization: Bearer',
+    or the optional ADMIN_API_KEY service key as 'X-API-Key' / bearer."""
+    supplied = x_api_key or bearer
+    if not supplied:
+        if not settings.admin_api_key and db.scalars(select(AdminUser.id).limit(1)).first() is None:
+            raise ApiError(503, "ADMIN_DISABLED", "Admin access is not configured (no administrator accounts or service key).")
+        raise ApiError(401, "UNAUTHORISED", "Sign in required.")
+    if settings.admin_api_key and hmac.compare_digest(supplied.encode(), settings.admin_api_key.encode()):
+        return "service-key", None
+    session = db.scalars(select(AdminSession).where(AdminSession.token_digest == token_digest(supplied))).first()
+    if session and not session.revoked and session.expires_at > utcnow() and session.user.active:
+        return session.user.email, session.user
+    if not settings.admin_api_key and db.scalars(select(AdminUser.id).limit(1)).first() is None:
+        raise ApiError(503, "ADMIN_DISABLED", "Admin access is not configured (no administrator accounts or service key).")
+    raise ApiError(401, "UNAUTHORISED", "Missing, invalid or expired credentials.")
+
+
+def require_admin(principal: tuple[str, AdminUser | None] = Depends(admin_principal)) -> str:
+    """Any authenticated administrator (staff login or service key). Returns the actor name for audit logs."""
+    return principal[0]
+
+
+def require_staff(principal: tuple[str, AdminUser | None] = Depends(admin_principal)) -> AdminUser:
+    """A signed-in staff member. Staff management never works with the shared service key."""
+    if principal[1] is None:
+        raise ApiError(403, "STAFF_LOGIN_REQUIRED", "This action requires an administrator login, not the service key.")
+    return principal[1]
 
 
 def audit(db: Session, actor: str, action: str, target: str, before: dict | None, after: dict | None) -> None:
@@ -63,4 +98,4 @@ def rate_limit(bucket: str, attr: str = "rate_limit_per_minute"):
     return dep
 
 
-__all__ = ["require_admin", "audit", "rate_limit", "limiter", "get_db"]
+__all__ = ["bearer_token", "require_admin", "require_staff", "admin_principal", "audit", "rate_limit", "limiter", "get_db"]

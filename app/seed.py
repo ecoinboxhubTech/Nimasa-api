@@ -1,8 +1,10 @@
 """Initial reference data. Only inserts rows that do not exist, so admin changes are never overwritten."""
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AlertRule, Dataset, DataSource, Location
+from app.models import AdminUser, AlertRule, Dataset, DataSource, Location
+from app.passwords import MIN_PASSWORD_LENGTH, hash_password
 
 SOURCES = [
     dict(
@@ -61,7 +63,14 @@ def seed(db: Session, settings: Settings) -> None:
             existing.source_id = settings.active_source  # active source is controlled by configuration (FR-024)
         else:
             db.add(Dataset(source_id=settings.active_source, **d))
+    db.flush()  # datasets must exist before the rules that reference them (PostgreSQL enforces foreign keys)
     for r in RULES:
         if not db.get(AlertRule, r["id"]):
             db.add(AlertRule(**r))
+    if settings.admin_bootstrap_email and settings.admin_bootstrap_password \
+            and db.scalars(select(AdminUser.id).limit(1)).first() is None:
+        if len(settings.admin_bootstrap_password) < MIN_PASSWORD_LENGTH:
+            raise RuntimeError(f"ADMIN_BOOTSTRAP_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters.")
+        db.add(AdminUser(email=settings.admin_bootstrap_email.strip().lower(),
+                         password_hash=hash_password(settings.admin_bootstrap_password)))
     db.commit()

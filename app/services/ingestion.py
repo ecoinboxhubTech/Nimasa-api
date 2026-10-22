@@ -7,12 +7,12 @@ import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import utcnow
-from app.models import Dataset, DataSource, IngestionRun, Location, Observation
+from app.models import AlertEvent, Dataset, DataSource, IngestionRun, Location, Observation
 from app.services import alerts
 from app.services.adapters import AdapterError, RawRecord, get_adapter
 
@@ -144,5 +144,9 @@ def run_all(db: Session, settings: Settings, only_source: str | None = None) -> 
 
 def purge_old(db: Session, settings: Settings, now: datetime) -> None:
     """Retention: do not keep source data longer than necessary (SRS 11.3)."""
-    db.execute(delete(Observation).where(Observation.observed_at < now - timedelta(days=settings.retention_days)))
+    cutoff = now - timedelta(days=settings.retention_days)
+    old = select(Observation.id).where(Observation.observed_at < cutoff)
+    # Alert events keep their own copy of value, source and time, so only the link to the purged row is dropped.
+    db.execute(update(AlertEvent).where(AlertEvent.observation_id.in_(old)).values(observation_id=None))
+    db.execute(delete(Observation).where(Observation.observed_at < cutoff))
     db.commit()
