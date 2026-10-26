@@ -47,7 +47,10 @@ def run_now(source: str | None = None, db: Session = Depends(get_db), settings: 
             actor: str = Depends(require_admin)):
     if source and not db.get(DataSource, source):
         raise ApiError(404, "SOURCE_NOT_FOUND", f"Source '{source}' does not exist.")
-    result = ingestion.run_all(db, settings, source)
+    try:
+        result = ingestion.run_all(db, settings, source)
+    except ingestion.IngestionBusy:
+        raise ApiError(409, "INGESTION_IN_PROGRESS", "An ingestion run is already in progress. Try again shortly.")
     audit(db, actor, "ingestion.run", source or "all-enabled", None, {"runs": [r.run_uid for r in result]})
     db.commit()
     return [_run_dict(r) for r in result]
@@ -80,6 +83,15 @@ def patch_dataset(dataset_key: str, body: DatasetPatch, db: Session = Depends(ge
     audit(db, actor, "dataset.update", dataset_key, before, {"stale_after_minutes": ds.stale_after_minutes})
     db.commit()
     return {"key": ds.key, "stale_after_minutes": ds.stale_after_minutes}
+
+
+@router.get("/alert-rules")
+def list_rules(db: Session = Depends(get_db)):
+    """Every rule with its editable fields, for the admin rules table."""
+    return [{"id": r.id, "name": r.name, "dataset": r.dataset_key, "operator": r.operator, "threshold": r.threshold,
+             "unit": r.unit, "suppression_hours": r.suppression_hours, "validity_hours": r.validity_hours,
+             "enabled": r.enabled, "review_status": r.review_status}
+            for r in db.scalars(select(AlertRule).order_by(AlertRule.id)).all()]
 
 
 @router.patch("/alert-rules/{rule_id}")

@@ -5,9 +5,10 @@ import math
 import time
 import uuid
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -19,6 +20,28 @@ from app.services.adapters import AdapterError, RawRecord, get_adapter
 log = logging.getLogger("blueintel.ingestion")
 VALID_KINDS = {"observation", "forecast", "model_estimate", "derived"}
 MAX_FUTURE = timedelta(days=7)
+INGEST_LOCK_KEY = 0x426C5565  # arbitrary app-wide PostgreSQL advisory lock id for "an ingestion cycle is running"
+
+
+class IngestionBusy(Exception):
+    """Another process (scheduler on another instance, or a manual run) is already ingesting."""
+
+
+@contextmanager
+def ingestion_lock(db: Session):
+    """Cross-process mutex so several web workers/instances never ingest at once.
+
+    Session-level advisory locks belong to one connection, and run_source commits (returning its connection to the
+    pool), so the lock is held on its own dedicated connection and released explicitly. If the process dies, the
+    server drops the lock when the connection closes."""
+    with db.get_bind().connect() as conn:
+        if not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": INGEST_LOCK_KEY}).scalar():
+            raise IngestionBusy()
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": INGEST_LOCK_KEY})
+            conn.commit()
 
 
 def validate_record(rec: RawRecord, datasets: dict[str, Dataset], location_ids: set[str], now: datetime) -> str | None:
@@ -139,7 +162,8 @@ def run_all(db: Session, settings: Settings, only_source: str | None = None) -> 
     q = select(DataSource).where(DataSource.enabled.is_(True))
     if only_source:
         q = q.where(DataSource.id == only_source)
-    return [run_source(db, settings, s) for s in db.scalars(q).all()]
+    with ingestion_lock(db):
+        return [run_source(db, settings, s) for s in db.scalars(q).all()]
 
 
 def purge_old(db: Session, settings: Settings, now: datetime) -> None:

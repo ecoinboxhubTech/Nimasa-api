@@ -42,7 +42,9 @@ class LocationOut(ORM):
 class DatasetOut(ORM):
     key: str
     label: str
+    description: str = ""
     unit: str
+    source_id: str
     refresh_minutes: int
     stale_after_minutes: int
     has_forecast: bool

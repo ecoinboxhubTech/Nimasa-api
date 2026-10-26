@@ -38,7 +38,10 @@ def configure_logging(level: str) -> None:
 def _scheduled_ingest(settings: Settings) -> None:
     assert db.SessionLocal is not None
     with db.SessionLocal() as session:
-        ingestion.run_all(session, settings)
+        try:
+            ingestion.run_all(session, settings)
+        except ingestion.IngestionBusy:
+            log.info("ingestion skipped: another instance holds the ingestion lock")
 
 
 def create_app() -> FastAPI:

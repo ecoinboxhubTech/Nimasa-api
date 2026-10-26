@@ -178,3 +178,42 @@ def test_hosted_postgres_urls_are_normalised_for_sqlalchemy():
     assert n("postgres://u:p@h.aivencloud.com:1/db?sslmode=require") == "postgresql+psycopg://u:p@h.aivencloud.com:1/db?sslmode=require"
     assert n("postgresql://u:p@h/db").startswith("postgresql+psycopg://")
     assert n("postgresql+psycopg://u:p@h/db") == "postgresql+psycopg://u:p@h/db"
+
+
+def test_bulk_summaries_cover_every_location(client):
+    r = client.get("/api/v1/summaries").json()
+    assert len(r) == 5 and all(len(s["indicators"]) == 3 for s in r)
+    two = client.get("/api/v1/summaries", params={"locations": "lekki,eleko"}).json()
+    assert [s["location"]["id"] for s in two] == ["lekki", "eleko"]
+
+
+def test_bulk_endpoints_reject_unknown_and_oversized_location_lists(client):
+    assert client.get("/api/v1/summaries", params={"locations": "lekki,nowhere"}).status_code == 404
+    too_many = ",".join(f"loc{i}" for i in range(21))
+    assert client.get("/api/v1/series", params={"locations": too_many, "dataset": "sst"}).status_code == 422
+
+
+def test_bulk_series_matches_single_location_series(client):
+    bulk = client.get("/api/v1/series", params={"locations": "lekki,eleko", "dataset": "sst"}).json()
+    single = client.get("/api/v1/locations/eleko/series", params={"dataset": "sst"}).json()
+    assert [s["location_id"] for s in bulk] == ["lekki", "eleko"]
+    assert bulk[1]["points"] == single["points"]
+
+
+def test_alerts_status_filter(client):
+    everything = client.get("/api/v1/alerts", params={"include_expired": True}).json()
+    for status in ("active", "expired", "suppressed_stale"):
+        got = client.get("/api/v1/alerts", params={"status": status}).json()
+        assert all(a["status"] == status for a in got)
+        assert len(got) == sum(a["status"] == status for a in everything)
+    assert client.get("/api/v1/alerts", params={"status": "bogus"}).status_code == 422
+
+
+def test_datasets_expose_source_id(client):
+    assert all(d["source_id"] for d in client.get("/api/v1/datasets").json())
+
+
+def test_admin_lists_alert_rules(client):
+    assert client.get("/api/v1/admin/alert-rules").status_code == 401
+    rules = client.get("/api/v1/admin/alert-rules", headers=ADMIN).json()
+    assert rules and {"id", "operator", "threshold", "enabled", "review_status"} <= set(rules[0])

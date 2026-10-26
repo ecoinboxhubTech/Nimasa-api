@@ -2,6 +2,7 @@
 import csv
 import io
 from datetime import datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import select, text
@@ -25,6 +26,19 @@ def _loc(db: Session, location_id: str) -> Location:
     if not loc:
         raise ApiError(404, "LOCATION_NOT_FOUND", f"Location '{location_id}' is not supported. See GET /api/v1/locations.")
     return loc
+
+
+MAX_BULK_LOCATIONS = 20
+
+
+def _locs(db: Session, ids: str | None) -> list[Location]:
+    """Resolve a comma-separated id list (or all locations). Unknown ids are an error, never silently dropped."""
+    if not ids:
+        return list(db.scalars(select(Location).order_by(Location.name)).all())
+    wanted = list(dict.fromkeys(i.strip() for i in ids.split(",") if i.strip()))
+    if not wanted or len(wanted) > MAX_BULK_LOCATIONS:
+        raise ApiError(422, "VALIDATION_ERROR", f"Provide between 1 and {MAX_BULK_LOCATIONS} location ids.")
+    return [_loc(db, i) for i in wanted]
 
 
 def _ref(src: DataSource | None) -> SourceRef | None:
@@ -75,9 +89,7 @@ def datasets(db: Session = Depends(get_db)):
     return db.scalars(select(Dataset).order_by(Dataset.key)).all()
 
 
-@router.get("/locations/{location_id}/summary", response_model=SummaryOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
-def summary(location_id: str, db: Session = Depends(get_db)):
-    loc, now = _loc(db, location_id), utcnow()
+def _summary(db: Session, loc: Location, now: datetime) -> SummaryOut:
     indicators, warnings = [], []
     for ds in db.scalars(select(Dataset).order_by(Dataset.key)).all():
         status, obs = feed_status(db, ds, loc.id, now)
@@ -92,6 +104,19 @@ def summary(location_id: str, db: Session = Depends(get_db)):
             source=_ref(source_for(db, obs, ds)) if obs else None))
     active = [1 for _, s in events_with_status(db, now, loc.id) if s == "active"]
     return SummaryOut(location=loc, generated_at=now, indicators=indicators, active_alerts=len(active), warnings=warnings)
+
+
+@router.get("/locations/{location_id}/summary", response_model=SummaryOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
+def summary(location_id: str, db: Session = Depends(get_db)):
+    return _summary(db, _loc(db, location_id), utcnow())
+
+
+@router.get("/summaries", response_model=list[SummaryOut], tags=["data"], dependencies=[Depends(rate_limit("public"))])
+def summaries(locations: str | None = Query(None, description="Comma-separated location ids; default = every location"),
+              db: Session = Depends(get_db)):
+    """Bulk summary for the map and landing page: one request instead of one per location."""
+    now = utcnow()
+    return [_summary(db, loc, now) for loc in _locs(db, locations)]
 
 
 def _series_query(db: Session, settings: Settings, location_id: str, dataset: str, start: datetime | None, end: datetime | None):
@@ -130,13 +155,8 @@ def series_csv(
                     headers={"Content-Disposition": f'attachment; filename="{loc.id}_{ds.key}.csv"'})
 
 
-@router.get("/locations/{location_id}/series", response_model=SeriesOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
-def series(
-    location_id: str, dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
-    start: datetime | None = Query(None, description="ISO 8601; default = 48 h ago"),
-    end: datetime | None = Query(None, description="ISO 8601; default = now + 48 h (forecast)"),
-    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
-):
+def _series_out(db: Session, settings: Settings, location_id: str, dataset: str,
+                start: datetime | None, end: datetime | None) -> SeriesOut:
     loc, ds, now, rows = _series_query(db, settings, location_id, dataset, start, end)
     status, latest = feed_status(db, ds, loc.id, now)
     past = [r.observed_at for r in rows if r.kind != "forecast"]
@@ -150,17 +170,42 @@ def series(
         gaps=[GapOut(start=g.start, end=g.end) for g in gaps])
 
 
+@router.get("/locations/{location_id}/series", response_model=SeriesOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
+def series(
+    location_id: str, dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
+    start: datetime | None = Query(None, description="ISO 8601; default = 48 h ago"),
+    end: datetime | None = Query(None, description="ISO 8601; default = now + 48 h (forecast)"),
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+):
+    return _series_out(db, settings, location_id, dataset, start, end)
+
+
+@router.get("/series", response_model=list[SeriesOut], tags=["data"], dependencies=[Depends(rate_limit("public"))])
+def series_bulk(
+    locations: str = Query(..., description="Comma-separated location ids (max 20)"),
+    dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
+    start: datetime | None = Query(None), end: datetime | None = Query(None),
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+):
+    """Same bounds and validation as the single-location endpoint, for several locations in one request."""
+    return [_series_out(db, settings, loc.id, dataset, start, end) for loc in _locs(db, locations)]
+
+
 @router.get("/alerts", response_model=list[AlertOut], tags=["alerts"], dependencies=[Depends(rate_limit("public"))])
-def alerts(location_id: str | None = None, include_expired: bool = False, db: Session = Depends(get_db)):
+def alerts(location_id: str | None = None, include_expired: bool = False,
+           status: Literal["active", "expired", "suppressed_stale"] | None = Query(None, description="Filter by derived status"),
+           db: Session = Depends(get_db)):
     if location_id:
         _loc(db, location_id)
     out = []
-    for e, status in events_with_status(db, utcnow(), location_id, include_expired):
+    for e, derived in events_with_status(db, utcnow(), location_id, include_expired or status == "expired"):
+        if status and derived != status:
+            continue
         out.append(AlertOut(
             id=e.id, rule_id=e.rule_id, rule_name=e.rule.name, location_id=e.location_id, dataset=e.dataset_key,
             condition=f"{e.dataset_key} {e.operator} {e.threshold:g} {e.unit}", value=e.value, threshold=e.threshold, unit=e.unit,
             data_type=e.data_kind, source_id=e.source_id, source_timestamp=e.triggered_at, issued_at=e.issued_at,
-            valid_until=e.valid_until, status=status, message=e.message))
+            valid_until=e.valid_until, status=derived, message=e.message))
     return out
 
 

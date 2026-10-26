@@ -105,3 +105,14 @@ def test_retention_purge(db_session):
     far = datetime.now(timezone.utc) + timedelta(days=s.retention_days + 30)
     purge_old(db_session, s, far)
     assert db_session.scalar(select(func.count()).select_from(Observation).where(Observation.observed_at < far - timedelta(days=s.retention_days))) == 0
+
+
+def test_concurrent_ingestion_is_refused(db_session):
+    """A second run while the lock is held is refused instead of double-ingesting (multi-instance safety)."""
+    import pytest
+    from app import db as dbmod
+    with ingestion.ingestion_lock(db_session):
+        with dbmod.SessionLocal() as other:
+            with pytest.raises(ingestion.IngestionBusy):
+                ingestion.run_all(other, get_settings())
+    assert ingestion.run_all(db_session, get_settings())  # lock released afterwards
