@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌊 BlueIntel Nigeria API
+# 🌊 Orizon Nimasa API
 
 **Ocean and coastal data you can trust: every value comes with its source, unit, timestamp and freshness.**
 
@@ -15,7 +15,7 @@
 
 ---
 
-FastAPI back-end for BlueIntel Nigeria, built from the *PRD & SRS v1.0*. It ingests, validates and serves ocean and coastal data, evaluates alert rules, and offers optional **Groq-powered, data-grounded AI insights**.
+FastAPI back-end for Orizon Nimasa, built from the *PRD & SRS v1.0*. It ingests, validates and serves ocean and coastal data, evaluates alert rules, and offers optional **Groq-powered, data-grounded AI insights**.
 
 > [!WARNING]
 > **Data status:** the default source is a synthetic **demo** generator. No real provider is approved yet (PRD §12, Appendix A). `open_meteo` is included as a *candidate* adapter and stays blocked until you set `SOURCE_LICENCE_REVIEWED=true`.
@@ -117,9 +117,12 @@ All paths are under `/api/v1`. Interactive docs are at `/docs`.
 | `GET /locations/{id}/summary` | Latest value per indicator, freshness and warnings | FR-008 |
 | `GET /locations/{id}/series?dataset=&start=&end=` | Bounded time series, each point labelled, **gaps reported** | FR-009/010 |
 | `GET /locations/{id}/series.csv?dataset=&start=&end=` | CSV export with time, unit, data type, source and attribution on every row | FR-011 |
-| `GET /alerts` · `GET /alert-rules` | Alerts with trigger, value, source, issue time, validity and derived status | FR-013 |
+| `GET /locations/{id}/series.png` · `.jpg` · `.pdf` (same query) | Chart export as an image or PDF, with source, data type and generation time on the page | FR-011 |
+| `GET /alerts?category=` · `GET /alert-rules` | Alerts with trigger, value, source, issue time, validity and derived status. `category` is `coastal`, `ocean_navigation` or `waterway_navigation` | FR-013 |
 | `POST /feedback` | Optional pilot feedback (no personal data) | 12.3 |
 | `POST /insights/query` | Groq-grounded Q&A with citations | FR-017–020 |
+
+Navigation alerts cover **ocean navigation** (offshore and coastal areas) and **waterway navigation** (lagoons and creeks) using wave height, wind, visibility and current speed. Each location has a `zone` (`coastal`, `waterway`, `offshore`; defined in `app/zones.py`) and each rule applies only to the zones it is meant for. The thresholds are illustrative and need review by a qualified marine specialist before pilot use.
 
 ### Admin (requires `Authorization: Bearer <session token>`)
 

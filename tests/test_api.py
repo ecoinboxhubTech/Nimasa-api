@@ -12,13 +12,13 @@ def test_health_separates_app_and_feeds(client):
 
 def test_metadata_endpoints(client):
     assert {s["id"] for s in client.get("/api/v1/sources").json()} == {"demo", "open_meteo"}
-    assert len(client.get("/api/v1/locations").json()) == 5
-    assert {d["key"] for d in client.get("/api/v1/datasets").json()} == {"wave_height", "wind_speed", "sst"}
+    assert len(client.get("/api/v1/locations").json()) == 8
+    assert {d["key"] for d in client.get("/api/v1/datasets").json()} == {"wave_height", "wind_speed", "sst", "visibility", "current_speed"}
 
 
 def test_summary_has_unit_source_time_and_type_on_every_value(client):
     r = client.get("/api/v1/locations/lekki/summary").json()
-    assert len(r["indicators"]) == 3
+    assert len(r["indicators"]) == 5
     for i in r["indicators"]:
         assert i["unit"] and i["observed_at"] and i["source"]["name"] and i["data_type"] in ("observation", "model_estimate")
         assert i["status"] == "fresh"
@@ -182,7 +182,7 @@ def test_hosted_postgres_urls_are_normalised_for_sqlalchemy():
 
 def test_bulk_summaries_cover_every_location(client):
     r = client.get("/api/v1/summaries").json()
-    assert len(r) == 5 and all(len(s["indicators"]) == 3 for s in r)
+    assert len(r) == 8 and all(len(s["indicators"]) == 5 for s in r)
     two = client.get("/api/v1/summaries", params={"locations": "lekki,eleko"}).json()
     assert [s["location"]["id"] for s in two] == ["lekki", "eleko"]
 
@@ -217,3 +217,36 @@ def test_admin_lists_alert_rules(client):
     assert client.get("/api/v1/admin/alert-rules").status_code == 401
     rules = client.get("/api/v1/admin/alert-rules", headers=ADMIN).json()
     assert rules and {"id", "operator", "threshold", "enabled", "review_status"} <= set(rules[0])
+
+
+def test_chart_exports_png_jpg_pdf(client):
+    magic = {"png": (b"\x89PNG", "image/png"), "jpg": (b"\xff\xd8", "image/jpeg"), "pdf": (b"%PDF", "application/pdf")}
+    for fmt, (head, ctype) in magic.items():
+        r = client.get(f"/api/v1/locations/lekki/series.{fmt}", params={"dataset": "wave_height"})
+        assert r.status_code == 200 and r.content.startswith(head) and r.headers["content-type"].startswith(ctype)
+        assert f"lekki_wave_height.{fmt}" in r.headers["content-disposition"]
+    assert client.get("/api/v1/locations/lekki/series.png", params={"dataset": "nope"}).status_code == 404
+    assert client.get("/api/v1/locations/nowhere/series.pdf", params={"dataset": "sst"}).status_code == 404
+    assert client.get("/api/v1/locations/lekki/series.gif", params={"dataset": "sst"}).status_code == 422
+
+
+def test_favicon_and_branding(client):
+    ico = client.get("/favicon.ico")
+    assert ico.status_code == 200 and ico.content[:4] == b"\x00\x00\x01\x00"
+    assert client.get("/static/favicon-32x32.png").content.startswith(b"\x89PNG")
+    assert "/static/favicon-32x32.png" in client.get("/docs").text
+    assert client.get("/").json()["name"] == "Orizon Nimasa API"
+
+
+def test_navigation_zones_and_rules(client):
+    zones = {l["id"]: l["zone"] for l in client.get("/api/v1/locations").json()}
+    assert zones["lagos-lagoon"] == "waterway" and zones["lagos-offshore"] == "offshore" and zones["lekki"] == "coastal"
+    rules = {r["id"]: r["category"] for r in client.get("/api/v1/alert-rules").json()}
+    assert rules["nav-ocean-visibility"] == "ocean_navigation" and rules["nav-waterway-current"] == "waterway_navigation"
+    assert rules["wave-high"] == "coastal"
+    everything = client.get("/api/v1/alerts", params={"include_expired": True}).json()
+    assert all(a["category"] and a["zone"] for a in everything)
+    for cat, allowed in (("ocean_navigation", {"coastal", "offshore"}), ("waterway_navigation", {"waterway"})):
+        got = client.get("/api/v1/alerts", params={"category": cat, "include_expired": True}).json()
+        assert all(a["category"] == cat and a["zone"] in allowed for a in got)
+    assert client.get("/api/v1/alerts", params={"category": "bogus"}).status_code == 422

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 DataType = Literal["observation", "forecast", "model_estimate", "derived"]
 Freshness = Literal["fresh", "stale", "empty"]
+AlertCategory = Literal["coastal", "ocean_navigation", "waterway_navigation"]
 
 
 class ORM(BaseModel):
@@ -37,6 +38,7 @@ class LocationOut(ORM):
     area: str
     lat: float
     lng: float
+    zone: Literal["coastal", "waterway", "offshore"] = "coastal"
 
 
 class DatasetOut(ORM):
@@ -100,7 +102,9 @@ class AlertOut(BaseModel):
     id: int
     rule_id: str
     rule_name: str
+    category: AlertCategory
     location_id: str
+    zone: Literal["coastal", "waterway", "offshore"]
     dataset: str
     condition: str
     value: float
@@ -159,7 +163,8 @@ class SourcePatch(BaseModel):
     enabled: bool
 
 
-EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+# Staff sign in with an email address or a staff ID such as STF001. Stored lower-case.
+EMAIL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._@+-]{2,253}$"
 
 
 class LoginIn(BaseModel):

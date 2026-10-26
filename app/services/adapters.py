@@ -70,6 +70,11 @@ def _demo_value(ds: str, loc: str, t: datetime) -> float:
         return max(0.3, wave + 0.35 * math.sin(h / 9.3 + (seed % 7)) + 0.28 * math.sin(h / 57) + 0.16 * n)
     if ds == "wind_speed":
         return max(2.0, wind + 6 * math.sin((hour_utc - 8) / 24 * 2 * math.pi) + 4 * math.sin(h / 41) + 5 * n)
+    if ds == "visibility":  # km; periodic fog/haze episodes so reduced-visibility alerts can be exercised
+        fog = 40 * max(0.0, math.sin(h / 61 + (seed % 3)) - 0.85)
+        return min(30.0, max(0.3, 8.0 + 2.0 * math.sin(h / 23) + 1.5 * math.sin(h / 7) + 1.5 * n - fog))
+    if ds == "current_speed":  # km/h
+        return max(0.1, 2.2 + 1.6 * math.sin(h / 6.2 + (seed % 7)) + 1.2 * math.sin(h / 49) + 0.5 * n)
     return sst + 0.35 * math.sin((hour_utc - 9) / 24 * 2 * math.pi) + 0.2 * math.sin(h / 90) + 0.1 * n
 
 
@@ -139,16 +144,19 @@ class OpenMeteoAdapter:
         try:
             for loc in locations:
                 common = dict(latitude=loc.lat, longitude=loc.lng, timezone="UTC", past_days=7, forecast_days=3)
-                marine = self._get(own, self.MARINE_URL, {**common, "hourly": "wave_height,sea_surface_temperature"})
-                weather = self._get(own, self.WEATHER_URL, {**common, "hourly": "wind_speed_10m", "wind_speed_unit": "kmh"})
-                plan = [("wave_height", marine, "wave_height"), ("sst", marine, "sea_surface_temperature"),
-                        ("wind_speed", weather, "wind_speed_10m")]
-                for key, payload, var in plan:
+                marine = self._get(own, self.MARINE_URL, {**common, "hourly": "wave_height,sea_surface_temperature,ocean_current_velocity"})
+                weather = self._get(own, self.WEATHER_URL, {**common, "hourly": "wind_speed_10m,visibility", "wind_speed_unit": "kmh"})
+                # (dataset, payload, provider variable, divisor to convert the provider unit to the dataset unit)
+                plan = [("wave_height", marine, "wave_height", 1), ("sst", marine, "sea_surface_temperature", 1),
+                        ("current_speed", marine, "ocean_current_velocity", 1),  # km/h
+                        ("wind_speed", weather, "wind_speed_10m", 1), ("visibility", weather, "visibility", 1000)]  # m -> km
+                for key, payload, var, divisor in plan:
                     if key not in keys:
                         continue
                     for t, v in self._rows(payload, var):
                         if v is None:
                             continue  # missing stays missing
+                        v = v / divisor
                         kind = "forecast" if t > now else "model_estimate"
                         if kind == "forecast" and not keys[key].has_forecast:
                             continue

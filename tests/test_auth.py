@@ -136,3 +136,13 @@ def test_login_is_rate_limited(monkeypatch):
     with TestClient(app) as c:
         codes = [login(c, password="wrong-password-123").status_code for _ in range(3)]
     assert codes == [401, 401, 429]
+
+
+def test_staff_can_sign_in_with_a_staff_id(staff_client):
+    h = bearer_for(staff_client, EMAIL, PASSWORD)
+    made = staff_client.post("/api/v1/admin/staff", headers=h, json={"email": "STF001", "password": "a-long-demo-password"})
+    assert made.status_code == 201 and made.json()["email"] == "stf001"
+    ok = login(staff_client, "STF001", "a-long-demo-password")
+    assert ok.status_code == 200 and ok.json()["user"]["email"] == "stf001"
+    assert login(staff_client, "STF001", "wrong-password-123").status_code == 401
+    assert login(staff_client, "has space", "x").status_code == 422

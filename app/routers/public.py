@@ -12,11 +12,13 @@ from app.config import Settings, get_settings
 from app.db import get_db, utcnow
 from app.errors import ApiError
 from app.models import AlertRule, Dataset, DataSource, Feedback, IngestionRun, Location
-from app.schemas import (AlertOut, DatasetOut, FeedbackIn, GapOut, Indicator, LocationOut, PointOut, SeriesOut, SourceOut,
+from app.schemas import (AlertCategory, AlertOut, DatasetOut, FeedbackIn, GapOut, Indicator, LocationOut, PointOut, SeriesOut, SourceOut,
                          SourceRef, SummaryOut)
 from app.security import rate_limit
 from app.services.alerts import events_with_status
 from app.services.data import age_minutes, feed_status, find_gaps, get_series, source_for
+from app.services.export import FORMATS, render_series
+from app.zones import category_of, zone_of
 
 router = APIRouter(prefix="/api/v1")
 
@@ -155,6 +157,26 @@ def series_csv(
                     headers={"Content-Disposition": f'attachment; filename="{loc.id}_{ds.key}.csv"'})
 
 
+@router.get("/locations/{location_id}/series.{fmt}", tags=["data"], dependencies=[Depends(rate_limit("public"))],
+            responses={200: {"content": {"image/png": {}, "image/jpeg": {}, "application/pdf": {}}}})
+def series_chart(
+    location_id: str, fmt: Literal["png", "jpg", "jpeg", "pdf"], dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
+    start: datetime | None = Query(None), end: datetime | None = Query(None),
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+):
+    """Chart export as PNG, JPG or PDF. Same data, bounds and validation as the JSON and CSV endpoints."""
+    loc, ds, now, rows = _series_query(db, settings, location_id, dataset, start, end)
+    status, latest = feed_status(db, ds, loc.id, now)
+    src = source_for(db, latest, ds)
+    media_type, mpl_format = FORMATS[fmt]
+    body = render_series(
+        mpl_format, title=f"{ds.label} - {loc.name}", unit=ds.unit,
+        points=[(r.observed_at, r.value, r.kind) for r in rows], expected_minutes=ds.refresh_minutes,
+        source_line=f"Source: {src.name}. {src.attribution}", status=status, generated_at=now)
+    return Response(body, media_type=media_type,
+                    headers={"Content-Disposition": f'attachment; filename="{loc.id}_{ds.key}.{"jpg" if fmt == "jpeg" else fmt}"'})
+
+
 def _series_out(db: Session, settings: Settings, location_id: str, dataset: str,
                 start: datetime | None, end: datetime | None) -> SeriesOut:
     loc, ds, now, rows = _series_query(db, settings, location_id, dataset, start, end)
@@ -194,6 +216,7 @@ def series_bulk(
 @router.get("/alerts", response_model=list[AlertOut], tags=["alerts"], dependencies=[Depends(rate_limit("public"))])
 def alerts(location_id: str | None = None, include_expired: bool = False,
            status: Literal["active", "expired", "suppressed_stale"] | None = Query(None, description="Filter by derived status"),
+           category: AlertCategory | None = Query(None, description="coastal, ocean_navigation or waterway_navigation"),
            db: Session = Depends(get_db)):
     if location_id:
         _loc(db, location_id)
@@ -201,8 +224,11 @@ def alerts(location_id: str | None = None, include_expired: bool = False,
     for e, derived in events_with_status(db, utcnow(), location_id, include_expired or status == "expired"):
         if status and derived != status:
             continue
+        if category and category_of(e.rule_id) != category:
+            continue
         out.append(AlertOut(
-            id=e.id, rule_id=e.rule_id, rule_name=e.rule.name, location_id=e.location_id, dataset=e.dataset_key,
+            id=e.id, rule_id=e.rule_id, rule_name=e.rule.name, category=category_of(e.rule_id), location_id=e.location_id,
+            zone=zone_of(e.location_id), dataset=e.dataset_key,
             condition=f"{e.dataset_key} {e.operator} {e.threshold:g} {e.unit}", value=e.value, threshold=e.threshold, unit=e.unit,
             data_type=e.data_kind, source_id=e.source_id, source_timestamp=e.triggered_at, issued_at=e.issued_at,
             valid_until=e.valid_until, status=derived, message=e.message))
@@ -211,7 +237,7 @@ def alerts(location_id: str | None = None, include_expired: bool = False,
 
 @router.get("/alert-rules", tags=["alerts"])
 def alert_rules(db: Session = Depends(get_db)):
-    return [{"id": r.id, "name": r.name, "dataset": r.dataset_key, "condition": f"{r.operator} {r.threshold:g} {r.unit}",
+    return [{"id": r.id, "name": r.name, "category": category_of(r.id), "dataset": r.dataset_key, "condition": f"{r.operator} {r.threshold:g} {r.unit}",
              "suppression_hours": r.suppression_hours, "validity_hours": r.validity_hours, "enabled": r.enabled,
              "review_status": r.review_status} for r in db.scalars(select(AlertRule)).all()]
 

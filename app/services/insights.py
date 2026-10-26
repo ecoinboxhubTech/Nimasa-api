@@ -16,7 +16,7 @@ from app.services.alerts import events_with_status
 from app.services.data import NON_FORECAST, age_minutes, feed_status, get_series, source_for
 from app.services.llm import GroqClient, LLMError
 
-DISCLAIMER = ("Informational summary of the data shown on BlueIntel. It is not an official forecast or warning, "
+DISCLAIMER = ("Informational summary of the data shown on Orizon Nimasa. It is not an official forecast or warning, "
               "not navigation or emergency advice, and not a guarantee of safety. Use official sources for decisions.")
 OFFICIAL = "official sources such as the Nigerian Meteorological Agency (NiMet) and the Nigerian Maritime Administration and Safety Agency (NIMASA)"
 
@@ -27,7 +27,7 @@ FISH = re.compile(r"\bwhere (are|is) the fish|\bfish(es)? (location|are biting|s
 UNSAFE_OUTPUT = re.compile(r"\b(is|are|be|it's|looks|seems)\s+(perfectly\s+|completely\s+|quite\s+)?(safe|unsafe)\b|\bsafe to (sail|go|fish|travel|navigate|launch)\b", re.I)
 CITE = re.compile(r"\[E(\d+)\]")
 
-SYSTEM_PROMPT = """You are the data explainer for BlueIntel Nigeria, a dashboard for coastal and ocean conditions.
+SYSTEM_PROMPT = """You are the data explainer for Orizon Nimasa, a dashboard for coastal and ocean conditions.
 Follow these rules strictly:
 1. Use ONLY facts written in the EVIDENCE block. Never use outside knowledge or invent numbers.
 2. Cite every fact with its evidence id in square brackets, for example [E2].
@@ -138,14 +138,14 @@ def answer_question(db: Session, llm: GroqClient, question: str, location_id: st
         _log(db, category, question, None, [], 0, t0)
         return InsightOut(
             answer_type=category, citations=[], model=None, disclaimer=DISCLAIMER,
-            answer=("I can't give safety, navigation or emergency advice, and BlueIntel can't tell you whether it is safe to travel or work at sea. "
+            answer=("I can't give safety, navigation or emergency advice, and Orizon Nimasa can't tell you whether it is safe to travel or work at sea. "
                     f"Please check {OFFICIAL}. In an emergency, contact emergency services (112 in Nigeria) or the relevant maritime authority."),
             limitations=["Safety-related questions are outside what this tool can answer."])
     if category == "refused_unsupported":
         _log(db, category, question, None, [], 0, t0)
         return InsightOut(
             answer_type=category, citations=[], model=None, disclaimer=DISCLAIMER,
-            answer="BlueIntel doesn't predict fish locations or catch. It only shows the selected ocean and weather indicators with their sources.",
+            answer="Orizon Nimasa doesn't predict fish locations or catch. It only shows the selected ocean and weather indicators with their sources.",
             limitations=["Fish-location prediction needs validated models and suitable data that this platform does not have."])
 
     locs = resolve_locations(db, question, location_id)

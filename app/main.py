@@ -4,9 +4,13 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import db
 from app.config import Settings, get_settings
@@ -17,6 +21,9 @@ from app.seed import seed
 from app.services import ingestion
 
 log = logging.getLogger("blueintel")
+APP_NAME = "Orizon Nimasa"
+STATIC_DIR = Path(__file__).parent / "static"
+FAVICON_URL = "/static/favicon-32x32.png"
 
 
 class JsonFormatter(logging.Formatter):
@@ -70,7 +77,7 @@ def create_app() -> FastAPI:
             scheduler.shutdown(wait=False)
         engine.dispose()
 
-    app = FastAPI(title="BlueIntel Nigeria API", version="0.1.0", lifespan=lifespan,
+    app = FastAPI(title=f"{APP_NAME} API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None,
                   description="Ocean and coastal data API with source-grounded AI insights (PRD/SRS v1.0).")
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_methods=["GET", "POST", "PATCH"],
                        allow_headers=["Content-Type", "X-API-Key", "Authorization"])
@@ -85,6 +92,20 @@ def create_app() -> FastAPI:
         response.headers["Cache-Control"] = "no-store" if "/admin" in request.url.path else "public, max-age=30"
         return response
 
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(STATIC_DIR / "favicon.ico", media_type="image/x-icon")
+
+    @app.get("/docs", include_in_schema=False)
+    def swagger_docs() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url=app.openapi_url, title=f"{app.title} - Docs", swagger_favicon_url=FAVICON_URL)
+
+    @app.get("/redoc", include_in_schema=False)
+    def redoc_docs() -> HTMLResponse:
+        return get_redoc_html(openapi_url=app.openapi_url, title=f"{app.title} - ReDoc", redoc_favicon_url=FAVICON_URL)
+
     install_error_handlers(app)
     app.include_router(public.router)
     app.include_router(insights.router)
@@ -93,7 +114,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root():
-        return {"name": "BlueIntel Nigeria API", "docs": "/docs", "health": "/api/v1/health"}
+        return {"name": f"{APP_NAME} API", "docs": "/docs", "health": "/api/v1/health"}
 
     return app
 

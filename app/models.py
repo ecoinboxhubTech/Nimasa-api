@@ -5,6 +5,7 @@ from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base, UTCDateTime, utcnow
+from app.zones import zone_of
 
 
 class DataSource(Base):
@@ -28,6 +29,10 @@ class Location(Base):
     area: Mapped[str] = mapped_column(String(200))
     lat: Mapped[float] = mapped_column(Float)
     lng: Mapped[float] = mapped_column(Float)
+
+    @property
+    def zone(self) -> str:
+        return zone_of(self.id)
 
 
 class Dataset(Base):
