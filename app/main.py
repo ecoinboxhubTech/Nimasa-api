@@ -37,6 +37,7 @@ class JsonFormatter(logging.Formatter):
 def configure_logging(level: str) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines contain request URLs, which can carry provider keys
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level.upper())

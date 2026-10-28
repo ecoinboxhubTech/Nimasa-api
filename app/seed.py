@@ -20,6 +20,14 @@ SOURCES = [
         refresh_interval_minutes=60,
         note="CANDIDATE source (model data). Check licence, commercial-use terms, limits and coverage, then set SOURCE_LICENCE_REVIEWED=true.",
     ),
+    dict(
+        id="meteosource", name="Meteosource Weather API", provider="Meteosource",
+        licence_status="not_reviewed", licence_url="https://www.meteosource.com/terms-of-service",
+        attribution="Weather data by Meteosource (to be confirmed)", documentation_url="https://www.meteosource.com/documentation",
+        refresh_interval_minutes=60,
+        note="CANDIDATE source (model data). Only wind speed is mapped; marine variables are not assumed. Verify plan, "
+             "marine fields, quota and licence, set METEOSOURCE_API_KEY, then SOURCE_LICENCE_REVIEWED=true.",
+    ),
 ]
 
 # Illustrative marine locations on the Lagos coast: placeholder pilot area until the product owner confirms one (PRD 18).

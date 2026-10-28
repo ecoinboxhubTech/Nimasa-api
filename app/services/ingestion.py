@@ -112,7 +112,7 @@ def run_source(db: Session, settings: Settings, source: DataSource, now: datetim
                 raw = adapter.fetch(locations, datasets, now)
                 break
             except AdapterError as e:
-                if e.category == "UNKNOWN_SOURCE" or attempt == settings.ingest_max_retries:
+                if e.category == "UNKNOWN_SOURCE" or not e.retryable or attempt == settings.ingest_max_retries:
                     raise
                 time.sleep(settings.ingest_backoff_seconds * 2 ** (attempt - 1))  # bounded exponential backoff
         assert raw is not None

@@ -18,7 +18,7 @@
 FastAPI back-end for Orizon Nimasa, built from the *PRD & SRS v1.0*. It ingests, validates and serves ocean and coastal data, evaluates alert rules, and offers optional **Groq-powered, data-grounded AI insights**.
 
 > [!WARNING]
-> **Data status:** the default source is a synthetic **demo** generator. No real provider is approved yet (PRD §12, Appendix A). `open_meteo` is included as a *candidate* adapter and stays blocked until you set `SOURCE_LICENCE_REVIEWED=true`.
+> **Data status:** the default source is a synthetic **demo** generator. No real provider is approved yet (PRD §12, Appendix A). `open_meteo` and `meteosource` are included as *candidate* adapters and stay blocked until you set `SOURCE_LICENCE_REVIEWED=true`.
 
 ## ✨ Highlights
 
@@ -154,7 +154,7 @@ flowchart LR
     DATA --> DB[(SQL database<br/>PostgreSQL / Aiven)]
     ALERTS --> DB
     SCHED[APScheduler] --> ING[services/ingestion.py<br/>validate, retry, run log]
-    ING --> ADP[services/adapters.py] --> PROV[(Provider<br/>demo / open_meteo)]
+    ING --> ADP[services/adapters.py] --> PROV[(Provider<br/>demo / open_meteo / meteosource)]
     ING --> DB
     ING --> ALERTS
 ```

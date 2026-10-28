@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     retention_days: int = 90
     demo_lag_hours: int = 0
 
+    meteosource_api_key: str = ""  # backend only; never sent to the browser or logged
+    meteosource_tier: str = "free"  # the endpoint tier of your Meteosource plan, e.g. free
+
     ai_enabled: bool = True
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"

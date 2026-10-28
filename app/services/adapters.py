@@ -27,9 +27,10 @@ class RawRecord:
 
 
 class AdapterError(Exception):
-    def __init__(self, category: str, message: str):
+    def __init__(self, category: str, message: str, retryable: bool = True):
         super().__init__(message)
         self.category = category
+        self.retryable = retryable  # False for key/plan/quota problems: retrying only burns quota
 
 
 class SourceAdapter(Protocol):
@@ -167,9 +168,107 @@ class OpenMeteoAdapter:
         return out
 
 
+# --------------------------------------------------------------------------------------
+# Meteosource adapter (CANDIDATE source). Disabled until SOURCE_LICENCE_REVIEWED=true and a key is configured.
+# Only fields verified for the account's plan are mapped. The general point endpoint is NOT assumed to carry marine
+# variables, so wave height, sea temperature, current speed and visibility stay unavailable (they are never
+# substituted with an unrelated measurement). Not exercised against the live API by the tests: verify the response
+# shape, the wind unit and the plan's allowed sections with a real key before relying on it.
+# --------------------------------------------------------------------------------------
+class MeteosourceAdapter:
+    BASE_URL = "https://www.meteosource.com/api/v1"
+    MS_TO_KMH = 3.6  # units=metric reports wind in m/s (confirm against the live API for your plan)
+
+    # dataset key -> (path into one hourly record, multiplier to reach the dataset unit)
+    FIELDS = {"wind_speed": (("wind", "speed"), MS_TO_KMH)}
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+        self.timeout = settings.ingest_timeout_seconds
+        self.key = settings.meteosource_api_key
+        tier = settings.meteosource_tier.strip().lower()
+        if not tier.isalnum():
+            raise AdapterError("CONFIG_ERROR", "METEOSOURCE_TIER must be a plain tier name such as 'free'", retryable=False)
+        self.tier = tier
+        self.client = client
+
+    def _get(self, client: httpx.Client, lat: float, lon: float) -> dict:
+        params = {"lat": f"{lat:.4f}", "lon": f"{lon:.4f}", "sections": "hourly", "timezone": "UTC",
+                  "language": "en", "units": "metric", "key": self.key}
+        try:
+            r = client.get(f"{self.BASE_URL}/{self.tier}/point", params=params)
+        except httpx.TimeoutException as e:
+            raise AdapterError("UPSTREAM_TIMEOUT", "Provider request timed out") from e
+        except httpx.HTTPError as e:  # message deliberately generic: the request URL contains the key
+            raise AdapterError("UPSTREAM_NETWORK_ERROR", "Provider could not be reached") from e
+        if r.status_code in (401, 403):
+            raise AdapterError("UPSTREAM_AUTH_ERROR", f"Provider rejected the key or plan (HTTP {r.status_code}). "
+                               "Check METEOSOURCE_API_KEY and METEOSOURCE_TIER", retryable=False)
+        if r.status_code == 402:
+            raise AdapterError("UPSTREAM_PLAN_OR_QUOTA", "Provider reports a plan or quota restriction (HTTP 402)", retryable=False)
+        if r.status_code == 429:
+            raise AdapterError("UPSTREAM_RATE_LIMITED", "Provider rate limit reached (HTTP 429)")  # retried with bounded backoff
+        if r.status_code >= 400:
+            raise AdapterError("UPSTREAM_HTTP_ERROR", f"Provider returned HTTP {r.status_code}")
+        try:
+            return r.json()
+        except ValueError as e:
+            raise AdapterError("UPSTREAM_BAD_RESPONSE", "Provider response could not be read") from e
+
+    @staticmethod
+    def _hourly(payload) -> list[dict]:
+        data = (payload.get("hourly") or {}).get("data") if isinstance(payload, dict) and isinstance(payload.get("hourly") or {}, dict) else None
+        if not isinstance(data, list):
+            raise AdapterError("UPSTREAM_BAD_RESPONSE", "Missing or malformed hourly data")
+        return data
+
+    @staticmethod
+    def _time(value) -> datetime:
+        t = datetime.fromisoformat(value)
+        return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
+
+    @staticmethod
+    def _pick(rec: dict, path: tuple[str, ...]):
+        for part in path:
+            rec = rec.get(part) if isinstance(rec, dict) else None
+        return rec
+
+    def fetch(self, locations, datasets, now):
+        if not self.key:
+            raise AdapterError("AUTH_NOT_CONFIGURED", "METEOSOURCE_API_KEY is not set", retryable=False)
+        wanted = {d.key: d for d in datasets if d.key in self.FIELDS}
+        own = self.client or httpx.Client(timeout=self.timeout)
+        out: list[RawRecord] = []
+        try:
+            for loc in locations:
+                if not (-90 <= loc.lat <= 90 and -180 <= loc.lng <= 180):
+                    raise AdapterError("CONFIG_ERROR", f"Location '{loc.id}' has invalid coordinates", retryable=False)
+                for rec in self._hourly(self._get(own, loc.lat, loc.lng)):
+                    try:
+                        t = self._time(rec["date"])
+                    except (KeyError, TypeError, ValueError) as e:
+                        raise AdapterError("UPSTREAM_BAD_RESPONSE", "Hourly record has no valid date") from e
+                    for key, ds in wanted.items():
+                        path, factor = self.FIELDS[key]
+                        v = self._pick(rec, path)
+                        if v is None:
+                            continue  # missing stays missing
+                        if isinstance(v, bool) or not isinstance(v, (int, float)):
+                            raise AdapterError("UPSTREAM_BAD_RESPONSE", f"Non-numeric value for '{key}'")
+                        kind = "forecast" if t > now else "model_estimate"
+                        if kind == "forecast" and not ds.has_forecast:
+                            continue
+                        out.append(RawRecord(key, loc.id, t, float(v) * factor, ds.unit, kind, "meteosource:" + ".".join(path)))
+        finally:
+            if self.client is None:
+                own.close()
+        return out
+
+
 def get_adapter(source_id: str, settings: Settings) -> SourceAdapter:
     if source_id == "demo":
         return DemoAdapter(settings)
     if source_id == "open_meteo":
         return OpenMeteoAdapter(settings)
+    if source_id == "meteosource":
+        return MeteosourceAdapter(settings)
     raise AdapterError("UNKNOWN_SOURCE", f"No adapter for source '{source_id}'")
