@@ -1,98 +1,200 @@
-<div align="center">
+# Orizon Nimasa API
 
-# 🌊 Orizon Nimasa API
+**The FastAPI back-end for Orizon Nimasa: ocean and coastal data where every value carries its source, unit, data type, timestamp and freshness.**
 
-**Ocean and coastal data you can trust: every value comes with its source, unit, timestamp and freshness.**
+This service does five things:
 
-![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-62%20passing-brightgreen)
-![Status](https://img.shields.io/badge/status-MVP%20%2F%20pilot--ready-blue)
+1. **Ingests** marine and weather readings from a data source on a schedule.
+2. **Validates and stores** them in PostgreSQL, with every record traceable to the ingestion run that produced it.
+3. **Evaluates alert rules** against the stored data and derives each alert's status (active / expired / not current) at read time.
+4. **Serves** maps, charts, summaries, alerts and CSV/PNG/JPG/PDF exports through a public JSON API, plus a protected operations API for staff.
+5. **Optionally answers questions** about the data with a Groq-hosted LLM, grounded in numbered evidence and wrapped in safety guardrails.
 
-[Quick start](#-quick-start) · [Endpoints](#-endpoints) · [Architecture](#-architecture) · [AI insights](#-ai-insights-groq) · [SRS coverage](#-srs-coverage)
+It is the server half of the Orizon Nimasa web app. The React front-end calls it at `/api/v1` and never talks to data providers or to Groq itself.
 
-</div>
+> **Data status:** the default source is a synthetic **demo** generator, so every value is fictional. No real provider is approved yet. `open_meteo` is included as a *candidate* adapter and stays blocked until you set `SOURCE_LICENCE_REVIEWED=true`. Alert thresholds are illustrative placeholders that need review by a marine or meteorological specialist.
+
+Built with Python 3.11+ (the Docker image uses 3.12), FastAPI, SQLAlchemy 2, PostgreSQL (psycopg 3), APScheduler, httpx and matplotlib.
 
 ---
 
-FastAPI back-end for Orizon Nimasa, built from the *PRD & SRS v1.0*. It ingests, validates and serves ocean and coastal data, evaluates alert rules, and offers optional **Groq-powered, data-grounded AI insights**.
+## What it serves
 
-> [!WARNING]
-> **Data status:** the default source is a synthetic **demo** generator. No real provider is approved yet (PRD §12, Appendix A). `open_meteo` and `meteosource` are included as *candidate* adapters and stay blocked until you set `SOURCE_LICENCE_REVIEWED=true`.
+### Coverage
 
-## ✨ Highlights
+**Eight locations** on the Lagos coast, in three zones. Zones are defined in `app/zones.py` and decide which alert rules apply where.
 
-| | |
+| Zone | Locations |
 |---|---|
-| 🏷️ **Provenance everywhere** | Every value carries unit, data type (observation / forecast / model estimate / derived), source and timestamp. |
-| ⏱️ **One freshness policy** | Per-dataset limits. A stale feed is never shown as current, and old alerts are never shown as active. |
-| 🕳️ **Honest gaps** | Missing values are reported as gaps. Nothing is interpolated. |
-| 🚨 **Traceable alerts** | Each alert links to its rule and the exact observation that triggered it, with duplicate suppression. |
-| 🤖 **Optional AI** | Source-cited answers with safety refusals. If AI is down, everything else keeps working. |
-| 🔐 **Operable and auditable** | Health split between app and feeds, ingestion run log, audited admin changes. |
+| `coastal` | Badagry, Lagos Harbour (Apapa), Bar Beach (Victoria Island), Lekki, Eleko |
+| `waterway` | Lagos Lagoon, Badagry Creek |
+| `offshore` | Lagos Offshore Approach |
 
-## 🚀 Quick start
+The coastal area is a placeholder until the pilot area is confirmed.
+
+**Five datasets (indicators).** Each has its own refresh interval, stale-after limit (admin-editable) and plausible range used to reject bad values.
+
+| Key | Indicator | Unit | Refresh | Stale after | Forecast | Plausible range |
+|---|---|---|---|---|---|---|
+| `wave_height` | Wave height | m | 60 min | 180 min | yes | 0 to 30 |
+| `wind_speed` | Wind speed | km/h | 60 min | 120 min | yes | 0 to 300 |
+| `sst` | Sea surface temperature | °C | 360 min | 720 min | no | 0 to 40 |
+| `visibility` | Visibility | km | 60 min | 180 min | yes | 0 to 100 |
+| `current_speed` | Current speed | km/h | 60 min | 180 min | yes | 0 to 30 |
+
+**Four data types**, attached to every point: `observation`, `forecast`, `model_estimate`, `derived`. The demo source labels wind as `observation` and everything else as `model_estimate`. The Open-Meteo adapter labels all non-forecast values `model_estimate`, because they come from a model.
+
+### The rules every response follows
+
+- **Provenance everywhere.** Each value carries unit, data type, source and timestamp. The source comes from the ingestion run that produced the record, not from current configuration.
+- **One freshness policy.** `fresh`, `stale` or `empty`, computed from the dataset's stale-after limit. Exactly at the limit is still fresh. The same function serves the API, alerts and AI. A stale feed is never shown as current.
+- **Honest gaps.** A gap is a hole larger than 1.5 times the expected interval. Gaps are reported in a separate `gaps` list. Nothing is interpolated.
+- **Traceable alerts.** Each alert links to its rule and to the exact observation that triggered it.
+- **UTC on the wire.** Every timestamp is ISO 8601 UTC. The UI converts to WAT (UTC+1).
+
+### Alert rules
+
+Nine rules are seeded. The comparison is inclusive, and a repeat trigger inside the suppression window does not create a new alert.
+
+| Rule id | Category | Condition | Applies to | Suppress / valid |
+|---|---|---|---|---|
+| `wave-high` | `coastal` | wave height ≥ 2.0 m | coastal, offshore | 6 h / 6 h |
+| `wind-strong` | `coastal` | wind ≥ 28 km/h | all zones | 3 h / 3 h |
+| `nav-ocean-waves` | `ocean_navigation` | wave height ≥ 2.5 m | coastal, offshore | 6 h / 6 h |
+| `nav-ocean-wind` | `ocean_navigation` | wind ≥ 40 km/h | coastal, offshore | 3 h / 3 h |
+| `nav-ocean-visibility` | `ocean_navigation` | visibility ≤ 2 km | coastal, offshore | 3 h / 3 h |
+| `nav-ocean-current` | `ocean_navigation` | current ≥ 5.5 km/h | coastal, offshore | 6 h / 6 h |
+| `nav-waterway-wind` | `waterway_navigation` | wind ≥ 22 km/h | waterway | 3 h / 3 h |
+| `nav-waterway-visibility` | `waterway_navigation` | visibility ≤ 1 km | waterway | 3 h / 3 h |
+| `nav-waterway-current` | `waterway_navigation` | current ≥ 4 km/h | waterway | 6 h / 6 h |
+
+Rules ignore forecast, missing and non-finite values. Events are created during ingestion by looking back 72 hours (`ALERT_LOOKBACK_HOURS`). **Status is derived on every read**, never stored:
+
+| Status | Meaning |
+|---|---|
+| `active` | Within its validity window and the underlying feed is fresh. |
+| `suppressed_stale` | Within its validity window but the feed is stale, so it must be shown as "not current". |
+| `expired` | Past `valid_until`. |
+
+Thresholds, enabled flags, suppression and validity windows can be changed at runtime through `PATCH /admin/alert-rules/{id}` (audited).
+
+---
+
+## Quick start
+
+Requires Python 3.11+ and a PostgreSQL database. PostgreSQL is the only supported database and there is no local fallback. The project is set up for Aiven PostgreSQL, but any PostgreSQL URL works (the suite was run against PostgreSQL 16).
 
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 cp .env.example .env                                   # then edit it (see below)
-uvicorn app.main:app --reload --port 8015                          # http://localhost:8015/docs
-pytest                                                 # 62 tests, no network needed
+python -m app.dbcheck                                  # optional: verify the database connection
+uvicorn app.main:app --reload --port 8015              # http://localhost:8015/docs
 ```
 
 Minimum `.env` edits:
 
 | Variable | Why |
 |---|---|
-| `GROQ_API_KEY` | Enables `/insights/query`. Get one at [console.groq.com](https://console.groq.com). Without it only the AI endpoint returns `503 AI_NOT_CONFIGURED`; everything else works (FR-020). |
-| `ADMIN_BOOTSTRAP_EMAIL` / `ADMIN_BOOTSTRAP_PASSWORD` | Creates the **first administrator** on startup when none exist (password at least 12 characters). Remove both afterwards and add staff through the API. |
-| `CORS_ORIGINS` | Your front-end origin(s). |
+| `DATABASE_URL` | **Required.** The server will not start without it. |
+| `ADMIN_BOOTSTRAP_EMAIL` / `ADMIN_BOOTSTRAP_PASSWORD` | Creates the **first administrator** on startup when none exist (password at least 12 characters, otherwise startup fails). Remove both afterwards and add staff through the API. |
+| `CORS_ORIGINS` | Your front-end origin(s), comma-separated. Default `http://localhost:5173`. |
+| `GROQ_API_KEY` | Optional. Enables `/insights/query`. Without it only that endpoint returns `503 AI_NOT_CONFIGURED`. |
 
-`ADMIN_API_KEY` is optional: a service key for scripts and automation. It cannot manage staff. Leave it empty to disable it.
+**What the first start does:** creates all tables, seeds the sources, locations, datasets and alert rules, creates the bootstrap administrator, and runs one ingestion immediately. With the demo source that stores about 8,900 records. After that the scheduler repeats ingestion every `INGEST_INTERVAL_MINUTES`.
 
-## 🗄️ Database (Aiven PostgreSQL)
+Check it is alive:
 
-The same managed Aiven PostgreSQL service is used for local development and production. Nothing else needs installing locally.
+```bash
+curl localhost:8015/api/v1/health
+curl "localhost:8015/api/v1/summaries?locations=lekki"
+```
 
-1. In the Aiven console, open your PostgreSQL service and copy the **Service URI** from *Overview*.
-2. **Use a separate database for each environment** so local testing never touches production data. In the service's *Databases* tab create `blueintel_dev` and `blueintel_prod`, then replace `defaultdb` in the URI:
+### Using Aiven PostgreSQL
+
+1. In the Aiven console open your PostgreSQL service and copy the **Service URI** from *Overview*.
+2. **Use a separate database per environment** (for example `blueintel_dev`, `blueintel_prod`, `blueintel_test`) so local work never touches production data. Replace `defaultdb` in the URI:
    ```
-   # local .env
    DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_dev?sslmode=require
-   # production environment variable
-   DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_prod?sslmode=require
    ```
    The `postgres://` prefix is converted automatically. Keep `?sslmode=require`.
-3. If your Aiven service restricts IP addresses, add your local machine's and your host's addresses under *Allowed IP addresses*.
-4. Check the connection (the password is never printed):
-   ```bash
-   python -m app.dbcheck
-   # OK  PostgreSQL 16.x, database 'blueintel_dev', TLS: yes
-   ```
-5. Start the API. Tables are created and seeded on first start.
-
-PostgreSQL is the only supported database; there is no local fallback. Keep real credentials in `.env` (git-ignored) or your host's secret store, never in the repo.
+3. If the service restricts IP addresses, allow your machine and your host under *Allowed IP addresses*.
+4. Run `python -m app.dbcheck`. It prints the server version, database name and whether TLS is in use, and never prints the password.
 
 ### Running the tests
 
-Tests run against PostgreSQL too, in their own database, because **every test starts by dropping all tables**. In the Aiven console create a database named `blueintel_test`, then add its URI to `.env`:
+```bash
+# .env or environment: BOTH must be set, and they must be different databases
+DATABASE_URL=postgres://.../blueintel_dev?sslmode=require
+TEST_DATABASE_URL=postgres://.../blueintel_test?sslmode=require
 
+pytest        # 74 tests, no external network calls
 ```
-TEST_DATABASE_URL=postgres://avnadmin:<password>@<host>.aivencloud.com:<port>/blueintel_test?sslmode=require
-```
 
-`pytest` refuses to run unless the database name ends in `_test` and differs from `DATABASE_URL`, so it can never wipe your dev or prod data. Because each test resets the database over the network, the suite takes a few minutes.
+- **Both URLs are required.** The app is created when `app.main` is imported, so `pytest` fails at start-up if `DATABASE_URL` is missing, even though the tests themselves use `TEST_DATABASE_URL`.
+- **Every test starts by dropping all tables.** `pytest` therefore refuses to run unless the test database name ends in `_test` and differs from `DATABASE_URL`.
+- Groq is replaced by a fake client and the Open-Meteo adapter is not exercised, so no test touches an external service.
+- On a local PostgreSQL the suite takes under two minutes. Against a remote host expect longer, because each test resets the database over the network.
 
-## 🔑 Who can do what
+---
+
+## Configuration
+
+All settings come from environment variables or `.env` (see `.env.example`). Inline `# comments` in `.env` are handled correctly.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_ENV` | `development` | Set to `production` to enable HSTS and the strict service-key length check. |
+| `LOG_LEVEL` | `INFO` | Logs are JSON, one object per line, on stdout. |
+| `CORS_ORIGINS` | `http://localhost:5173` | Allowed front-end origins. Methods allowed: GET, POST, PATCH. |
+| `DATABASE_URL` | none, **required** | PostgreSQL URL. Non-PostgreSQL URLs are rejected at start-up. |
+| `TEST_DATABASE_URL` | none | Used only by `pytest`. Must end in `_test`. |
+| `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_BOOTSTRAP_PASSWORD` | empty | First administrator, created only if no administrators exist. |
+| `ADMIN_SESSION_HOURS` | `8` | Lifetime of a login token. |
+| `ADMIN_MAX_FAILED_LOGINS` / `ADMIN_LOCKOUT_MINUTES` | `5` / `15` | Account lockout. |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Per IP. |
+| `ADMIN_API_KEY` | empty (disabled) | Optional service key for scripts. At least 24 characters when `APP_ENV=production`. |
+| `ACTIVE_SOURCE` | `demo` | `demo` or `open_meteo`. See [Adding a real data source](#adding-a-real-data-source) for how it really behaves. |
+| `SOURCE_LICENCE_REVIEWED` | `false` | Must be `true` before any non-demo source will ingest. |
+| `SCHEDULER_ENABLED` | `true` | Runs ingestion inside the web process. |
+| `INGEST_INTERVAL_MINUTES` | `60` | Scheduler period. |
+| `INGEST_MAX_RETRIES` / `INGEST_BACKOFF_SECONDS` | `3` / `2` | Retries for provider errors, with exponential backoff. |
+| `INGEST_TIMEOUT_SECONDS` | `20` | Provider request timeout. |
+| `RETENTION_DAYS` | `90` | Observations older than this are deleted after each run. |
+| `DEMO_LAG_HOURS` | `0` | Makes the demo feed N hours old, to test stale-data behaviour. |
+| `AI_ENABLED` | `true` | Set `false` to switch the AI endpoint off. |
+| `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_BASE_URL`, `GROQ_TIMEOUT_SECONDS` | empty, `llama-3.3-70b-versatile`, Groq URL, `20` | Check Groq's current model list, as models are retired over time. |
+| `RATE_LIMIT_PER_MINUTE` | `30` | Per IP, for public data endpoints and feedback. |
+| `INSIGHTS_RATE_LIMIT_PER_MINUTE` | `6` | Per IP, for the AI endpoint. |
+| `MAX_SERIES_DAYS` | `14` | Longest time range per series request. Supported but not listed in `.env.example`. |
+| `ALERT_LOOKBACK_HOURS` | `72` | How far back alert evaluation looks. Supported but not listed in `.env.example`. |
+
+---
+
+## Using it with the front-end
+
+The Orizon Nimasa React app switches from its built-in synthetic data to this API when `VITE_API_BASE_URL` is set.
+
+1. Run this API on port **8015** (the port the front-end's `.env.example` and Dockerfile use).
+2. Add the front-end's origin to `CORS_ORIGINS` (for example `http://localhost:5173`) and restart the API. Alternatively, set the front-end's `VITE_API_BASE_URL` to `/api/v1` and let its Vite dev server proxy `/api` to this service, which needs no CORS.
+3. The front-end loads all data with `GET /series` (one call per indicator, all locations) and `GET /alerts`, polls every 5 minutes, and keeps the admin bearer token in `sessionStorage`.
+
+`docs/FRONTEND_API.md` is the detailed contract for front-end developers.
+
+---
+
+## Who can do what
 
 | Role | Can | Login |
 |---|---|---|
-| **Public visitor** | View published maps, charts and public alerts. Nothing to register, no password. | **No** |
-| **Administrator** | Manage data sources, alert rules and freshness settings, inspect ingestion failures and **manage staff access** | **Yes** |
+| **Public visitor** | View maps, charts, summaries and alerts, export data, send feedback, use the AI endpoint. | No |
+| **Administrator** | Everything above, plus run ingestion, change alert thresholds, freshness limits and source switches, read feedback and the audit log, and **manage staff**. | Yes |
+
+There is a single administrator role, and the public never has accounts.
 
 ```bash
-# Sign in (returns a bearer token valid for ADMIN_SESSION_HOURS, default 8)
+# Sign in. "email" accepts an email address OR a staff ID such as STF001.
+# The response contains a bearer token valid for ADMIN_SESSION_HOURS (default 8).
 curl -X POST localhost:8015/api/v1/admin/auth/login -H "Content-Type: application/json" \
      -d '{"email": "you@example.com", "password": "your-password"}'
 
@@ -100,135 +202,207 @@ curl -X POST localhost:8015/api/v1/admin/auth/login -H "Content-Type: applicatio
 curl localhost:8015/api/v1/admin/feeds -H "Authorization: Bearer <access_token>"
 ```
 
-Passwords are hashed with scrypt, and only a digest of each session token is stored. After `ADMIN_MAX_FAILED_LOGINS` (5) wrong passwords an account locks for `ADMIN_LOCKOUT_MINUTES` (15); login is also rate-limited per IP. Failed logins never reveal whether an email is registered. Deactivating a person or resetting their password signs them out everywhere at once.
+**Credentials and sessions**
+- Passwords are hashed with scrypt (minimum 12 characters). Only a SHA-256 digest of each session token is stored.
+- After `ADMIN_MAX_FAILED_LOGINS` wrong passwords an account locks for `ADMIN_LOCKOUT_MINUTES`. Login is also rate-limited per IP. Every login failure returns the same `401 INVALID_CREDENTIALS`, so it never reveals whether an account exists.
+- Deactivating someone or resetting their password signs them out everywhere. Changing your own password signs out your other sessions.
+- If there are no administrator accounts and no service key, admin routes return `503 ADMIN_DISABLED`.
 
-The first start creates the tables in your PostgreSQL database, seeds reference data and runs one ingestion. After that the scheduler runs it every `INGEST_INTERVAL_MINUTES`.
+**The optional service key** (`ADMIN_API_KEY`, sent as `X-API-Key` or as a bearer token) is for scripts. It can call the operations endpoints but **cannot** manage staff or use `/admin/auth/*`: those return `403 STAFF_LOGIN_REQUIRED`.
 
-## 📡 Endpoints
+---
 
-All paths are under `/api/v1`. Interactive docs are at `/docs`.
+## API reference
+
+All paths are under `/api/v1`. Interactive docs are at `/docs` (Swagger) and `/redoc`, and the schema is at `/openapi.json`.
+
+**Conventions**
+- **Errors** always look like `{"error": {"code": "...", "message": "..."}}`. Validation errors (422) add `error.details`.
+- **Times** are ISO 8601 UTC. Query parameters that take a time **must include a timezone**.
+- **Series range** is at most 14 days (`422 RANGE_TOO_LARGE`). The default window is 48 h back to 48 h ahead, so forecasts are included.
+- **Rate limits** are per IP and per process: 30 requests/min on the data, alert, export and feedback endpoints, 10/min on login, 6/min on AI. Over the limit returns `429 RATE_LIMITED`. `/health`, `/sources`, `/locations`, `/datasets` and `/alert-rules` are not limited, so monitors work.
+- **Caching:** responses outside `/admin` carry `Cache-Control: public, max-age=30`. Admin responses are `no-store`. Every response has an `X-Request-ID`.
 
 ### Public
 
-| Method & path | Purpose | SRS |
-|---|---|---|
-| `GET /health` | App health **and** per-feed health, reported separately | FR-021 |
-| `GET /sources` · `/locations` · `/datasets` | Metadata, licence and attribution status | 12.3 |
-| `GET /locations/{id}/summary` | Latest value per indicator, freshness and warnings | FR-008 |
-| `GET /locations/{id}/series?dataset=&start=&end=` | Bounded time series, each point labelled, **gaps reported** | FR-009/010 |
-| `GET /locations/{id}/series.csv?dataset=&start=&end=` | CSV export with time, unit, data type, source and attribution on every row | FR-011 |
-| `GET /locations/{id}/series.png` · `.jpg` · `.pdf` (same query) | Chart export as an image or PDF, with source, data type and generation time on the page | FR-011 |
-| `GET /alerts?category=` · `GET /alert-rules` | Alerts with trigger, value, source, issue time, validity and derived status. `category` is `coastal`, `ocean_navigation` or `waterway_navigation` | FR-013 |
-| `POST /feedback` | Optional pilot feedback (no personal data) | 12.3 |
-| `POST /insights/query` | Groq-grounded Q&A with citations | FR-017–020 |
+| Method & path | Purpose |
+|---|---|
+| `GET /health` | App health and per-feed health, reported **separately**. `feeds.status` is `healthy`, `degraded` or `unknown` (no enabled source). |
+| `GET /sources` · `/locations` · `/datasets` | Metadata: licence and attribution status, location zones, freshness limits. |
+| `GET /summaries?locations=a,b` | Latest value, data type, age and freshness for every indicator, for several locations in one request (default: all, max 20). Includes active alert counts and warnings. |
+| `GET /locations/{id}/summary` | The same for one location. |
+| `GET /locations/{id}/series?dataset=&start=&end=` | Time series with every point labelled and **gaps reported**. |
+| `GET /series?locations=a,b&dataset=&start=&end=` | The same for several locations in one request (max 20), in the order requested. |
+| `GET /locations/{id}/series.csv?dataset=&start=&end=` | CSV with time, unit, data type, source and attribution on every row. |
+| `GET /locations/{id}/series.png` · `.jpg` · `.pdf` | Chart export (observed solid, forecast dashed, gaps left open, source and generation time in the footer). Same query and limits. |
+| `GET /alerts?location_id=&category=&status=&include_expired=` | Alerts with trigger, value, source, issue time, validity and derived status. `category` is `coastal`, `ocean_navigation` or `waterway_navigation`. |
+| `GET /alert-rules` | The rules and their review status. |
+| `POST /feedback` | Optional pilot feedback (`found_information`, `source_clarity`, `comments`). At least one answer is required, and no personal data is collected. |
+| `POST /insights/query` | Data-grounded Q&A with citations. See [AI insights](#ai-insights-groq). |
 
-Navigation alerts cover **ocean navigation** (offshore and coastal areas) and **waterway navigation** (lagoons and creeks) using wave height, wind, visibility and current speed. Each location has a `zone` (`coastal`, `waterway`, `offshore`; defined in `app/zones.py`) and each rule applies only to the zones it is meant for. The thresholds are illustrative and need review by a qualified marine specialist before pilot use.
+### Admin (`Authorization: Bearer <session token>`)
 
-### Admin (requires `Authorization: Bearer <session token>`)
+Every change below is written to the audit log.
 
-| Method & path | Purpose | SRS |
-|---|---|---|
-| `POST /admin/auth/login` · `/logout` · `/change-password` · `GET /admin/auth/me` | Staff sign-in and session management (login is the only unauthenticated admin path) | NFR-006 |
-| `GET /admin/staff` · `POST /admin/staff` · `PATCH /admin/staff/{id}` | List, add, deactivate staff or reset a password. **Audited**; needs a staff login, not the service key | NFR-006 |
-| `GET /admin/feeds` · `/ingestion-runs` · `/audit-log` · `/feedback` | Operations views | FR-021/022 |
-| `POST /admin/ingestion/run` | Run ingestion now | |
-| `PATCH /admin/alert-rules/{id}` | Change thresholds. **Audited** | FR-023 |
-| `PATCH /admin/sources/{id}` | Switch a faulty source on or off. **Audited** | FR-023 |
-| `PATCH /admin/datasets/{key}` | Change a freshness threshold (not below the refresh interval). **Audited** | FR-024 |
+| Method & path | Purpose |
+|---|---|
+| `POST /admin/auth/login` | Sign in (the only unauthenticated admin route). |
+| `POST /admin/auth/logout` · `/change-password` · `GET /admin/auth/me` | Session management. Staff login required. |
+| `GET /admin/staff` · `POST /admin/staff` · `PATCH /admin/staff/{id}` | List, add, deactivate/reactivate staff or reset a password. You cannot deactivate yourself. Staff login required. |
+| `GET /admin/feeds` | Freshness of every dataset at every location, plus the 20 most recent ingestion runs. |
+| `GET /admin/ingestion-runs?limit=` | Run history (run id, source, outcome, records, rejected, error category). |
+| `POST /admin/ingestion/run?source=` | Run ingestion now. `409 INGESTION_IN_PROGRESS` if one is already running. |
+| `GET /admin/alert-rules` · `PATCH /admin/alert-rules/{id}` | List rules; change `threshold`, `enabled`, `suppression_hours`, `validity_hours` or `review_status`. |
+| `PATCH /admin/sources/{id}` | Switch a source on or off (the way to disable a faulty feed). |
+| `PATCH /admin/datasets/{key}` | Change `stale_after_minutes` (never below the refresh interval). |
+| `GET /admin/audit-log?limit=` · `GET /admin/feedback?limit=` | Operations views. |
 
-Timestamps are ISO 8601 UTC. Series are limited to 14 days per request. Public data endpoints are rate-limited per IP; `/health` is not, so monitors work.
+---
 
-## 🏗️ Architecture
+## How ingestion works
+
+Pages never fetch from providers on view. A scheduler runs ingestion, and the API reads from the database.
+
+1. **Lock.** A PostgreSQL advisory lock ensures only one ingestion runs at a time across all workers and instances. The scheduled run skips if another holds the lock, and a manual run returns `409`.
+2. **Adapter.** Only `services/adapters.py` knows a provider's format, and adapters return neutral records. Provider errors are retried up to `INGEST_MAX_RETRIES` times with exponential backoff.
+3. **Licence gate.** Any source other than `demo` fails with `LICENCE_NOT_REVIEWED` unless `SOURCE_LICENCE_REVIEWED=true`.
+4. **Validate.** Each record is checked, and rejects are counted by reason: `unknown_dataset`, `unknown_location`, `invalid_kind`, `invalid_timestamp`, `timestamp_too_far_in_future` (over 7 days), `missing_or_invalid_value`, `unit_mismatch`, `impossible_value` (outside the plausible range). Units are never silently converted.
+5. **Store.** New points are inserted and duplicates are skipped. Past observations are never overwritten. Forecast values are refreshed when they change. Every record links to its run.
+6. **Evaluate alerts** for every enabled rule and applicable location.
+7. **Purge** observations older than `RETENTION_DAYS`. Alert events keep their own copy of value, source and time.
+
+A run ends as `success`, `partial` (some records rejected) or `failed`, with an error category such as `LICENCE_NOT_REVIEWED`, `UPSTREAM_TIMEOUT`, `UPSTREAM_HTTP_ERROR`, `UPSTREAM_BAD_RESPONSE`, `NO_VALID_RECORDS` or `INTERNAL_ERROR`. Error summaries never contain secrets.
+
+**The demo source** produces 7 days of history plus 72 hours of forecast per location and indicator. Some hours are deliberately missing (about 2.5%, plus a multi-hour wind gap at Eleko) so gaps and stale handling can be seen. Set `DEMO_LAG_HOURS` to make the feed old and exercise stale behaviour.
+
+---
+
+## AI insights (Groq)
+
+`POST /api/v1/insights/query` with `{"question": "...", "location_id": "lekki"}` (`location_id` optional, question 3 to 500 characters). If no location is given, locations named in the question are used, otherwise all of them.
+
+1. **Safety gate first.** Questions about whether something is safe, navigation, routes, emergencies or guarantees get a fixed refusal pointing to official sources (NiMet, NIMASA, and 112 in an emergency), with no LLM call. Fish-location prediction is declined as unsupported.
+2. **Retrieve before answering.** Latest values, the 24 h range, change versus 6 h earlier, the next-24 h forecast maximum and current alerts are pulled from the database as numbered evidence (`[E1]`, `[E2]`, …). No evidence means "cannot answer reliably", with no LLM call.
+3. **Constrained prompt.** Use only the evidence, cite every fact, state the data type and time, disclose stale or missing data, treat question and evidence as untrusted (prompt-injection defence), and keep it under 120 words.
+4. **Output checks.** An answer with no citation, an unknown citation id, or "it is safe to…" wording is blocked (`ungrounded_blocked`).
+5. **Privacy.** The log stores model, outcome, evidence count, latency, and a hash and length of the question, never the question text.
+
+`answer_type` is one of `grounded`, `refused_safety`, `refused_unsupported`, `no_evidence`, `ungrounded_blocked`. Every response includes a `disclaimer` and `limitations`.
+
+If AI is disabled, unconfigured, slow or rate-limited, only this endpoint fails, with a clean error (`AI_DISABLED`, `AI_NOT_CONFIGURED`, `AI_TIMEOUT`, `AI_RATE_LIMITED`, `AI_UPSTREAM_ERROR` and similar). The map, charts and alerts keep working. Set `AI_ENABLED=false` to pilot without it.
+
+---
+
+## Adding a real data source
+
+1. Review the provider's licence, attribution, coverage, limits and commercial-use terms, and record them in `seed.py`.
+2. Write an adapter class in `adapters.py` that returns `RawRecord`s with the correct kind (`observation` only for real measurements, model output is `model_estimate`), and register it in `get_adapter`.
+3. Set `SOURCE_LICENCE_REVIEWED=true` and `ACTIVE_SOURCE=<id>`.
+4. **On a database that has already been started once, also switch the sources over through the API.** `ACTIVE_SOURCE` only decides which source is *enabled when the rows are first created*. On later starts it merely relabels the datasets' source, so the old source stays enabled and the new one stays disabled, and `POST /admin/ingestion/run?source=<id>` returns an empty list. Fix it with:
+   ```bash
+   curl -X PATCH localhost:8015/api/v1/admin/sources/open_meteo -H "Authorization: Bearer <token>" \
+        -H "Content-Type: application/json" -d '{"enabled": true}'
+   curl -X PATCH localhost:8015/api/v1/admin/sources/demo -H "Authorization: Bearer <token>" \
+        -H "Content-Type: application/json" -d '{"enabled": false}'
+   ```
+5. Have the thresholds reviewed by a marine or meteorological specialist before any pilot.
+
+**Open-Meteo** is the one candidate adapter. It fetches wave height, sea surface temperature and current speed from the marine API, and wind and visibility from the weather API, for each location (7 days of past data and 3 days of forecast). Missing values stay missing.
+
+**`seed.py` only inserts rows that do not exist.** Editing a location, dataset or rule in `seed.py` does not change an existing database. Use the admin PATCH endpoints for rules, sources and freshness limits. There is no endpoint for locations.
+
+---
+
+## Architecture
 
 ```mermaid
 flowchart LR
     UI[React front-end] -->|HTTP / JSON| API[FastAPI routers]
-    OPS[Operator] -->|X-API-Key| API
+    OPS[Operator / script] -->|Bearer or X-API-Key| API
     API --> PUB[public.py<br/>read API, alerts, feedback]
     API --> AI[insights.py<br/>optional AI]
-    API --> ADM[admin.py<br/>feeds, rules, audit]
+    API --> ADM[admin.py + auth.py<br/>feeds, rules, staff, audit]
     PUB --> DATA[services/data.py<br/>freshness, series, gaps]
     PUB --> ALERTS[services/alerts.py]
+    PUB --> EXP[services/export.py<br/>PNG / JPG / PDF]
     AI --> INS[services/insights.py<br/>retrieve + guardrails] --> LLM[services/llm.py] --> GROQ[(Groq API)]
     INS --> DB
-    DATA --> DB[(SQL database<br/>PostgreSQL / Aiven)]
+    DATA --> DB[(PostgreSQL)]
     ALERTS --> DB
-    SCHED[APScheduler] --> ING[services/ingestion.py<br/>validate, retry, run log]
-    ING --> ADP[services/adapters.py] --> PROV[(Provider<br/>demo / open_meteo / meteosource)]
+    SCHED[APScheduler] --> ING[services/ingestion.py<br/>lock, validate, retry, run log]
+    ADM -->|run now| ING
+    ING --> ADP[services/adapters.py] --> PROV[(Provider<br/>demo / open_meteo)]
     ING --> DB
     ING --> ALERTS
 ```
 
-**Key decisions** (SRS §9.2):
-
-- **Adapters are isolated.** Only `adapters.py` knows a provider's format. Swapping a source never touches the API.
-- **The browser never calls providers or Groq.** Keys live only in server env vars.
-- **Scheduled ingestion, not fetch-on-view.** Pages read from the database.
-- **Provenance per record.** Each observation links to the ingestion run, and so the source, that produced it.
-- **One freshness policy** in `services/data.py`, used by the API, alerts and AI (NFR-004).
-- **Alert status is derived at read time.** A stale feed can never show an old alert as `active` (FR-015).
-- **AI is optional.** If Groq is down, unconfigured or rate-limited, only `/insights/query` fails, with a clean error.
-
-<details>
-<summary><b>📁 Folder structure</b></summary>
+**Key decisions**
+- **Adapters are isolated.** Swapping a source never touches the API.
+- **The browser never calls providers or Groq.** Keys live only in server environment variables.
+- **Scheduled ingestion, not fetch-on-view.**
+- **Provenance per record**, through the ingestion run.
+- **One freshness policy** in `services/data.py`.
+- **Alert status is derived at read time**, so a stale feed can never show an old alert as `active`.
+- **AI is optional and isolated.**
 
 ```
 blueintel-api/
 ├── app/
-│   ├── main.py          app factory, scheduler, middleware
+│   ├── main.py          app factory, scheduler, CORS, security headers, JSON logging
 │   ├── config.py        settings from env
 │   ├── db.py            engine/session, UTC datetime type
-│   ├── models.py        tables (SRS §11 entities)
+│   ├── models.py        tables
 │   ├── schemas.py       request/response models
 │   ├── security.py      admin auth, rate limiting, audit helper
+│   ├── passwords.py     scrypt hashing, session tokens
 │   ├── errors.py        consistent {"error": {code, message}}
-│   ├── seed.py          sources, locations, datasets, alert rules
-│   ├── routers/         public.py · insights.py · admin.py
-│   └── services/        adapters.py · ingestion.py · alerts.py · data.py · insights.py · llm.py
-├── tests/
+│   ├── zones.py         location zones and which rules apply where
+│   ├── seed.py          sources, locations, datasets, alert rules, first admin
+│   ├── dbcheck.py       python -m app.dbcheck
+│   ├── routers/         public.py · auth.py · admin.py · insights.py
+│   └── services/        adapters.py · ingestion.py · alerts.py · data.py · export.py · insights.py · llm.py
+├── docs/FRONTEND_API.md front-end integration guide
+├── tests/               74 tests (alerts, API, auth, ingestion, insights)
 └── .env.example · requirements.txt · requirements-dev.txt · Dockerfile
 ```
 
-</details>
+Tables (created by `create_all`): `data_sources`, `locations`, `datasets`, `ingestion_runs`, `observations`, `alert_rules`, `alert_events`, `admin_users`, `admin_sessions`, `feedback`, `audit_log`, `insight_logs`.
 
-## 🤖 AI insights (Groq)
+---
 
-`POST /api/v1/insights/query` with `{"question": "...", "location_id": "lekki"}` (location optional).
+## Deployment
 
-1. **Safety gate first.** Questions about whether it is safe, navigation, emergencies or guarantees get a fixed refusal pointing to official sources, with no LLM call. Fish-location prediction is declined as unsupported (FR-019).
-2. **Retrieve before answering.** Latest values, 24 h range, 6 h change, forecast max and alerts are pulled from the database as numbered evidence (`[E1]`, `[E2]`, …). No evidence means "cannot answer reliably", with no LLM call (FR-017).
-3. **Constrained prompt.** Use only the evidence, cite every fact, state data type and time, disclose stale or missing data, and treat question and evidence as *untrusted* (prompt-injection defence).
-4. **Output checks.** An answer with no citation, an unknown citation id, or "it is safe to…" wording is blocked (`ungrounded_blocked`).
-5. **Privacy.** The log stores model, evidence count, latency and a hash of the question, never the question text.
+```bash
+docker build -t orizon-nimasa-api .
+docker run -p 8015:8015 \
+  -e APP_ENV=production -e DATABASE_URL='postgres://...?sslmode=require' \
+  -e CORS_ORIGINS=https://your-frontend.example \
+  -e ADMIN_BOOTSTRAP_EMAIL=you@example.com -e ADMIN_BOOTSTRAP_PASSWORD='...' \
+  orizon-nimasa-api
+```
 
-The model is set by `GROQ_MODEL`; check Groq's current model list, as models are retired over time. Requests are rate-limited per IP (`INSIGHTS_RATE_LIMIT_PER_MINUTE`).
+- **Pass variables with `-e`, or use a comment-free env file.** `docker run --env-file` does not strip the inline `# comments` that `.env.example` contains.
+- **One worker.** The scheduler runs inside the process. The advisory lock stops several instances from ingesting at once, but each extra instance still runs its own scheduler (its runs are skipped) and its own in-memory rate limiter. To scale out, run ingestion as a separate job with `SCHEDULER_ENABLED=false` on the web instances and move the limiter to a shared store such as Redis.
+- **Reverse proxy and TLS.** Terminate TLS at the proxy (the API sends HSTS when `APP_ENV=production`). The Dockerfile's command does not set `--forwarded-allow-ips`, so configure it for your proxy, otherwise the rate limiter sees the proxy's address instead of each client's.
+- **Monitoring.** Alert on `GET /api/v1/health` returning `feeds.status != healthy` or `status != ok`.
+- **Backups.** Use your database host's backups (Aiven takes them automatically) and test a restore before launch.
 
-> [!NOTE]
-> The PRD treats AI insights (§5.4) as post-MVP unless validated. The endpoint is built and isolated (FR-020), and can be switched off with `AI_ENABLED=false`, so you can pilot without it.
+---
 
-## 🔌 Adding a real data source
+## Known limitations
 
-1. Review the provider's licence, attribution, coverage, limits and commercial-use terms, and record them in `seed.py`.
-2. Write an adapter class in `adapters.py` returning `RawRecord`s with the correct kind (`observation` only for real measurements; model output is `model_estimate`).
-3. Set `ACTIVE_SOURCE=<id>` and `SOURCE_LICENCE_REVIEWED=true`.
-4. Have the thresholds in `seed.py` reviewed by a marine or meteorological specialist before any pilot.
+- **Synthetic data by default.** The Open-Meteo adapter has not been exercised against the live API, and the Groq client is tested only against a fake transport. Test both with real credentials before relying on them.
+- **No migrations.** Tables are created with `create_all`, which creates missing tables and never alters existing ones. Add Alembic before changing the schema on a database that already holds data.
+- **One role, no MFA, no self-service password reset.** Reset passwords through `PATCH /admin/staff/{id}`.
+- **Locations are not editable through the API.** Coverage changes require editing `seed.py` and the database rows directly. Zones live in `app/zones.py`.
+- **Notifications are not implemented** (email, SMS or push alerts, SRS FR-016). Alerts are in-app only.
+- **Placeholders:** alert thresholds are illustrative, and the Lagos coast and the five indicators are assumptions pending the PRD §18 decisions.
 
-## ✅ SRS coverage
+## SRS coverage
 
 | Status | Items |
 |---|---|
-| ✅ Implemented | FR-006–015 · FR-011 (server-side CSV) · FR-017–024 · NFR-002/004/005/006/008/011 · NFR-007 (HSTS in production; TLS terminates at the proxy) · security controls in §14.1 |
-| ⏭️ Not implemented | FR-016 (email/SMS/push, optional in the MVP) · public user accounts (PRD 14.2: the public needs no login) |
+| Implemented | FR-006 to FR-015 · FR-011 (server-side CSV/PNG/JPG/PDF export) · FR-017 to FR-024 · NFR-002, 004, 005, 006, 008, 011 · NFR-007 (HSTS in production; TLS terminates at the proxy) · the security controls in §14.1 |
+| Not implemented | FR-016 (email/SMS/push, optional in the MVP) · public user accounts (PRD 14.2: the public needs no login) |
 
-Notes: FR-024 freshness thresholds are admin-configurable, but the coverage area is set in `seed.py`. Security controls include secrets in env, validated input, parameterised queries, rate limits, admin auth and no secrets in logs.
-
-## ⚠️ Known limits and next steps
-
-- **Verified:** all 62 tests pass and the server was smoke-tested locally. The Groq client is tested against a mocked HTTP transport, and the Open-Meteo adapter is *not* exercised because tests must not call external services. **Test both with your real key and the live API before relying on them.**
-- **Migrations:** tables are created with `create_all`, which only creates missing tables and never alters existing ones. Add Alembic before changing the schema on a database that already holds data (such as your Aiven production database).
-- **Aiven backups:** Aiven takes automatic backups; test a restore before launch (NFR-008).
-- **Scaling:** the scheduler and rate limiter run in-process (use one worker). For several instances, run ingestion as a separate job and move the limiter to Redis.
-- **Reverse proxy:** configure forwarded headers so the rate limiter sees real client IPs, and terminate TLS at the proxy (NFR-007).
-- **Backups and monitoring:** use your database host's backups and test a restore before launch (NFR-008). Alert on `/api/v1/health` → `feeds.status != healthy`.
-- **Admin auth:** there is one role (administrator) and no self-service password reset or MFA yet. Reset passwords through `PATCH /admin/staff/{id}`. Sessions are stored in the database, so they survive restarts and work across instances.
-- **Placeholders:** alert thresholds are illustrative, and the Lagos coast and three indicators are assumptions pending the PRD §18 decisions.
+Freshness thresholds (FR-024) are admin-configurable. Security controls include secrets in environment variables, validated input, parameterised queries, rate limits, admin authentication and no secrets in logs.
