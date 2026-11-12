@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models import AlertEvent, AlertRule, Dataset, Location, Observation
 from app.services.data import NON_FORECAST, feed_status, source_for
-from app.zones import rule_applies
+from app.zones import rule_applies_to_location
 
 OPS = {">=": lambda v, t: v >= t, "<=": lambda v, t: v <= t}
 
@@ -69,7 +69,7 @@ def evaluate_all(db: Session, now: datetime, lookback_hours: int = 72) -> int:
             continue
         since = now - timedelta(hours=lookback_hours)
         for loc in locations:
-            if not rule_applies(rule.id, loc.id):
+            if not rule_applies_to_location(rule, loc):
                 continue
             rows = db.scalars(
                 select(Observation).where(
@@ -122,3 +122,4 @@ def events_with_status(db: Session, now: datetime, location_id: str | None = Non
             continue
         out.append((ev, status))
     return out
+

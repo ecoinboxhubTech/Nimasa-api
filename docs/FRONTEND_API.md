@@ -127,13 +127,31 @@ so hide or disable the chat rather than the dashboard.
 
 ---
 
+## Marine and developer sandbox
+
+These public endpoints return demo data and are explicitly labelled as such. Optionally send `X-API-Key` to meter usage against a developer key.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /vessels` | active demo AIS vessels with latest position, SOG and COG |
+| `GET /vessels/{mmsi}/track?hours=48` | `{vessel, points: [...]}` track replay |
+| `GET /bathymetry?bbox=minLng,minLat,maxLng,maxLat` | depth points `{lat, lng, depth_m, survey_name, source}` |
+| `GET /tides?location_id=lekki&hours=48` | predictions, high/low waters, datum and `simulated` flag |
+| `GET /data-quality` | quality summary (same shape as `/admin/quality`) |
+| `POST /developer/keys` | create a sandbox key (`{name, owner_email?}`); raw key returned once |
+| `GET /developer/usage` | usage for the supplied `X-API-Key` |
+| `GET /developer/recipes` | base URL, auth header, endpoints, cURL and JavaScript examples |
+
+Demo AIS/bathymetry/tides must never be presented as real navigation data. Real providers are not configured in this build.
+
 ## Admin (login required)
 
 ### Authentication
-`POST /admin/auth/login` with `{"email", "password"}` returns
-`{"access_token", "token_type": "bearer", "expires_at", "user": {id, email, active, created_at, last_login_at}}`.
+`POST /admin/auth/login` with `{"email", "password", "totp_code"?}` returns
+`{"access_token", "token_type": "bearer", "expires_at", "user": {id, email, role, active, mfa_enabled, created_at, last_login_at}}`.
+If MFA is enabled and the code is missing the API returns `401 MFA_REQUIRED`; show a six-digit field and retry.
 Send `Authorization: Bearer <access_token>` on every admin call. Sessions last 8 hours by default.
-Failures are all `401 INVALID_CREDENTIALS` (wrong password, locked after 5 failures, or inactive; deliberately not distinguishable).
+Failures are `401 INVALID_CREDENTIALS` (wrong password, locked after 5 failures, or inactive; deliberately not distinguishable).
 Missing or expired token: `401 UNAUTHORISED`. Send the user back to the login page.
 
 | Endpoint | Purpose |
@@ -141,6 +159,11 @@ Missing or expired token: `401 UNAUTHORISED`. Send the user back to the login pa
 | `GET /admin/auth/me` | current user; use it as the route guard |
 | `POST /admin/auth/logout` | revoke the current token |
 | `POST /admin/auth/change-password` | `{current_password, new_password (min 12)}` |
+| `POST /admin/auth/password-reset/request` | `{email}`; always `202`. In non-production without SMTP it also returns `reset_token` |
+| `POST /admin/auth/password-reset/confirm` | `{token, new_password}` |
+| `POST /admin/auth/mfa/setup` | returns `{secret, otpauth_uri}` |
+| `POST /admin/auth/mfa/enable` | `{code}` |
+| `POST /admin/auth/mfa/disable` | `{password}` |
 
 Keep the token in memory (or `sessionStorage`); do not put it in `localStorage` if you can avoid it.
 
@@ -156,7 +179,14 @@ Keep the token in memory (or `sessionStorage`); do not put it in `localStorage` 
 | `PATCH /admin/alert-rules/{id}` | any of `threshold, enabled, suppression_hours (0–168], validity_hours (0–168], review_status` |
 | `GET /admin/audit-log?limit=100` | `[{at, actor, action, target, before, after}]` |
 | `GET /admin/feedback?limit=100` | `[{at, found_information, source_clarity, comments}]` |
-| `GET/POST /admin/staff`, `PATCH /admin/staff/{id}` | list, create (`{email, password}`), deactivate or reset password. Needs a staff login |
+| `GET/POST /admin/staff`, `PATCH /admin/staff/{id}` | list, create (`{email, password, role}`), change role, deactivate or reset password. Staff-admin only |
+| `GET/POST /admin/locations`, `PATCH/DELETE /admin/locations/{id}` | location CRUD (locations with observations cannot be deleted) |
+| `POST/DELETE /admin/alert-rules`, `PATCH /admin/alert-rules/{id}` | rule CRUD; deleting a rule also deletes its events |
+| `GET/POST /admin/api-keys`, `PATCH /admin/api-keys/{id}`, `POST /admin/api-keys/{id}/rotate` | issue, disable, re-quota and rotate keys. The raw key appears once |
+| `GET/POST /admin/notification-targets`, `PATCH/DELETE /admin/notification-targets/{id}`, `POST .../{id}/test` | email/SMS/webhook targets and test delivery |
+| `GET /admin/notifications`, `POST /admin/notifications/dispatch` | outbox status and manual dispatch |
+| `GET/POST /admin/jobs`, `POST /admin/jobs/run` | durable `ingestion`, `notification_dispatch`, `retention`, `quality_scan` jobs |
+| `GET /admin/quality` | data-quality summary |
 
 Run `status` values: `running`, `success`, `partial` (some records rejected), `failed`.
 Server-side role checks apply; the UI guard is only a convenience.

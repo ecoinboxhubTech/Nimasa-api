@@ -1,5 +1,6 @@
 """Admin authentication, rate limiting and audit helper (NFR-006, FR-023, 14.1)."""
 import hmac
+import json
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -12,8 +13,9 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.db import get_db, utcnow
 from app.errors import ApiError
-from app.models import AdminSession, AdminUser, AuditLog
+from app.models import AdminSession, AdminUser, ApiKey, AuditLog
 from app.passwords import token_digest
+from app.services import api_keys
 
 
 # Declared as security schemes so Swagger UI (/docs) shows an Authorize button and sends the credential.
@@ -62,8 +64,47 @@ def require_staff(principal: tuple[str, AdminUser | None] = Depends(admin_princi
     return principal[1]
 
 
+def require_editor(principal: tuple[str, AdminUser | None] = Depends(admin_principal)) -> str:
+    """Write access: the service key, or a staff account with the admin/operator role. Viewers are read-only."""
+    actor, user = principal
+    if user is not None and user.role not in ("admin", "operator"):
+        raise ApiError(403, "INSUFFICIENT_ROLE", "Your role is read-only. Ask an administrator for operator access.")
+    return actor
+
+
+def require_staff_admin(user: AdminUser = Depends(require_staff)) -> AdminUser:
+    if user.role != "admin":
+        raise ApiError(403, "INSUFFICIENT_ROLE", "Only an administrator can perform this action.")
+    return user
+
+
+def developer_key(request: Request, x_api_key: str | None = Depends(api_key_scheme),
+                  settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> ApiKey | None:
+    """Optional sandbox key on public data endpoints. Invalid keys are rejected; absent keys use the open sandbox tier."""
+    if not x_api_key or (settings.admin_api_key and hmac.compare_digest(x_api_key.encode(), settings.admin_api_key.encode())):
+        return None
+    key = api_keys.resolve(db, x_api_key)
+    if key is None:
+        raise ApiError(401, "INVALID_API_KEY", "API key is invalid, revoked or inactive.")
+    limiter.check("developer-key", key.prefix, key.rate_limit_per_minute)
+    api_keys.meter(db, key, request.url.path)
+    return key
+
+
+def require_developer_key(key: ApiKey | None = Depends(developer_key)) -> ApiKey:
+    if key is None:
+        raise ApiError(401, "API_KEY_REQUIRED", "Create a sandbox key and send it as X-API-Key.")
+    return key
+
+
+def _json_safe(value: dict | None) -> dict | None:
+    if value is None:
+        return None
+    return json.loads(json.dumps(value, default=str))
+
+
 def audit(db: Session, actor: str, action: str, target: str, before: dict | None, after: dict | None) -> None:
-    db.add(AuditLog(actor=actor, action=action, target=target, before=before, after=after))
+    db.add(AuditLog(actor=actor, action=action, target=target, before=_json_safe(before), after=_json_safe(after)))
 
 
 class RateLimiter:
@@ -98,4 +139,5 @@ def rate_limit(bucket: str, attr: str = "rate_limit_per_minute"):
     return dep
 
 
-__all__ = ["bearer_token", "require_admin", "require_staff", "admin_principal", "audit", "rate_limit", "limiter", "get_db"]
+__all__ = ["bearer_token", "require_admin", "require_staff", "require_editor", "require_staff_admin", "developer_key",
+           "require_developer_key", "admin_principal", "audit", "rate_limit", "limiter", "get_db"]

@@ -16,9 +16,10 @@ from app import db
 from app.config import Settings, get_settings
 from app.errors import install_error_handlers
 from app.models import Observation  # noqa: F401  (ensures models are registered)
-from app.routers import admin, auth, insights, public
+from app.routers import admin, auth, developer, insights, marine, public
+from app.schema_upgrade import upgrade as upgrade_schema
 from app.seed import seed
-from app.services import ingestion
+from app.services import ingestion, jobs
 
 log = logging.getLogger("blueintel")
 APP_NAME = "Orizon Nimasa"
@@ -52,6 +53,15 @@ def _scheduled_ingest(settings: Settings) -> None:
             log.info("ingestion skipped: another instance holds the ingestion lock")
 
 
+def _scheduled_jobs(settings: Settings) -> None:
+    assert db.SessionLocal is not None
+    with db.SessionLocal() as session:
+        try:
+            jobs.run_pending(session, settings)
+        except Exception:  # noqa: BLE001 - a bad job must not stop the scheduler
+            log.exception("scheduled job processing failed")
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -63,12 +73,16 @@ def create_app() -> FastAPI:
         from app import models  # noqa: F401
         engine = db.init_engine(settings.database_url)
         db.Base.metadata.create_all(engine)
+        upgrade_schema(engine)
         with db.SessionLocal() as session:
             seed(session, settings)
         scheduler = None
         if settings.scheduler_enabled:
             from apscheduler.schedulers.background import BackgroundScheduler
             scheduler = BackgroundScheduler(timezone="UTC")
+            if settings.jobs_enabled:
+                scheduler.add_job(_scheduled_jobs, "interval", seconds=settings.job_poll_seconds, args=[settings],
+                                  max_instances=1, coalesce=True, id="jobs")
             scheduler.add_job(_scheduled_ingest, "interval", minutes=settings.ingest_interval_minutes, args=[settings],
                               next_run_time=datetime.now(), max_instances=1, coalesce=True, id="ingest")
             scheduler.start()
@@ -80,7 +94,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=f"{APP_NAME} API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None,
                   description="Ocean and coastal data API with source-grounded AI insights (PRD/SRS v1.0).")
-    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_methods=["GET", "POST", "PATCH"],
+    app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_methods=["GET", "POST", "PATCH", "DELETE"],
                        allow_headers=["Content-Type", "X-API-Key", "Authorization"])
 
     @app.middleware("http")
@@ -112,6 +126,8 @@ def create_app() -> FastAPI:
     app.include_router(insights.router)
     app.include_router(auth.router)
     app.include_router(admin.router)
+    app.include_router(marine.router)
+    app.include_router(developer.router)
 
     @app.get("/", include_in_schema=False)
     def root():
@@ -121,3 +137,6 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+

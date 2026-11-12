@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: nimasa-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: main
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_BOOTSTRAP_EMAIL
+        sync: false
+      - key: ADMIN_BOOTSTRAP_PASSWORD
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ACTIVE_SOURCE
+        value: demo
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      - key: AI_ENABLED
+        value: "true"

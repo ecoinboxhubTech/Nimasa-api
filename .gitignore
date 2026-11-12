@@ -20,3 +20,8 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Stale local database artefacts
+*.db
+*.sqlite*
+

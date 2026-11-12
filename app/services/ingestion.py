@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import utcnow
 from app.models import AlertEvent, Dataset, DataSource, IngestionRun, Location, Observation
-from app.services import alerts
+from app.services import alerts, notifications
 from app.services.adapters import AdapterError, RawRecord, get_adapter
 
 log = logging.getLogger("blueintel.ingestion")
@@ -140,6 +140,8 @@ def run_source(db: Session, settings: Settings, source: DataSource, now: datetim
         run.completed_at = utcnow()
         db.commit()
         new_alerts = alerts.evaluate_all(db, now, settings.alert_lookback_hours)
+        if settings.notifications_enabled:
+            notifications.notify_new_alerts(db, settings, now - timedelta(hours=1))
         purge_old(db, settings, now)
         log.info("ingestion run=%s source=%s status=%s stored=%d rejected=%d new_alerts=%d",
                  run.run_uid, source.id, run.status, run.record_count, run.rejected_count, new_alerts)
@@ -174,3 +176,4 @@ def purge_old(db: Session, settings: Settings, now: datetime) -> None:
     db.execute(update(AlertEvent).where(AlertEvent.observation_id.in_(old)).values(observation_id=None))
     db.execute(delete(Observation).where(Observation.observed_at < cutoff))
     db.commit()
+

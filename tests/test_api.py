@@ -11,7 +11,8 @@ def test_health_separates_app_and_feeds(client):
 
 
 def test_metadata_endpoints(client):
-    assert {s["id"] for s in client.get("/api/v1/sources").json()} == {"demo", "open_meteo", "meteosource"}
+    assert {s["id"] for s in client.get("/api/v1/sources").json()} == {"demo", "open_meteo", "meteosource",
+                                                                       "demo-ais", "demo-bathymetry"}
     assert len(client.get("/api/v1/locations").json()) == 8
     assert {d["key"] for d in client.get("/api/v1/datasets").json()} == {"wave_height", "wind_speed", "sst", "visibility", "current_speed"}
 

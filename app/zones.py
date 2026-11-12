@@ -35,3 +35,15 @@ def category_of(rule_id: str) -> str:
 
 def rule_applies(rule_id: str, location_id: str) -> bool:
     return zone_of(location_id) in RULE_META.get(rule_id, ("coastal", ALL_ZONES))[1]
+
+
+def rule_applies_to_location(rule, location) -> bool:
+    """Prefer zones stored on the rule (admin-created rules); fall back to the seeded code map."""
+    zones = getattr(rule, "zones", None)
+    if zones:
+        return location.zone in zones
+    return rule_applies(getattr(rule, "id", ""), location.id)
+
+
+def category_for_rule(rule) -> str:
+    return getattr(rule, "category", None) or category_of(getattr(rule, "id", ""))

@@ -46,6 +46,8 @@ _BASE = {
     "bar-beach": (1.5, 16.0, 28.0),
     "lekki": (1.75, 17.0, 28.1),
     "eleko": (1.6, 18.0, 27.8),
+    # Offshore baseline stays high enough that the demo always has at least one wave advisory to trace.
+    "lagos-offshore": (2.9, 22.0, 27.6),
 }
 
 

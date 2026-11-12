@@ -14,11 +14,11 @@ from app.errors import ApiError
 from app.models import AlertRule, Dataset, DataSource, Feedback, IngestionRun, Location
 from app.schemas import (AlertCategory, AlertOut, DatasetOut, FeedbackIn, GapOut, Indicator, LocationOut, PointOut, SeriesOut, SourceOut,
                          SourceRef, SummaryOut)
-from app.security import rate_limit
+from app.security import developer_key, rate_limit
 from app.services.alerts import events_with_status
 from app.services.data import age_minutes, feed_status, find_gaps, get_series, source_for
 from app.services.export import FORMATS, render_series
-from app.zones import category_of, zone_of
+from app.zones import category_for_rule, zone_of
 
 router = APIRouter(prefix="/api/v1")
 
@@ -108,12 +108,12 @@ def _summary(db: Session, loc: Location, now: datetime) -> SummaryOut:
     return SummaryOut(location=loc, generated_at=now, indicators=indicators, active_alerts=len(active), warnings=warnings)
 
 
-@router.get("/locations/{location_id}/summary", response_model=SummaryOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/locations/{location_id}/summary", response_model=SummaryOut, tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def summary(location_id: str, db: Session = Depends(get_db)):
     return _summary(db, _loc(db, location_id), utcnow())
 
 
-@router.get("/summaries", response_model=list[SummaryOut], tags=["data"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/summaries", response_model=list[SummaryOut], tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def summaries(locations: str | None = Query(None, description="Comma-separated location ids; default = every location"),
               db: Session = Depends(get_db)):
     """Bulk summary for the map and landing page: one request instead of one per location."""
@@ -138,7 +138,7 @@ def _series_query(db: Session, settings: Settings, location_id: str, dataset: st
     return loc, ds, now, get_series(db, ds.key, loc.id, start, end)
 
 
-@router.get("/locations/{location_id}/series.csv", tags=["data"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/locations/{location_id}/series.csv", tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def series_csv(
     location_id: str, dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
     start: datetime | None = Query(None), end: datetime | None = Query(None),
@@ -157,7 +157,7 @@ def series_csv(
                     headers={"Content-Disposition": f'attachment; filename="{loc.id}_{ds.key}.csv"'})
 
 
-@router.get("/locations/{location_id}/series.{fmt}", tags=["data"], dependencies=[Depends(rate_limit("public"))],
+@router.get("/locations/{location_id}/series.{fmt}", tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)],
             responses={200: {"content": {"image/png": {}, "image/jpeg": {}, "application/pdf": {}}}})
 def series_chart(
     location_id: str, fmt: Literal["png", "jpg", "jpeg", "pdf"], dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
@@ -192,7 +192,7 @@ def _series_out(db: Session, settings: Settings, location_id: str, dataset: str,
         gaps=[GapOut(start=g.start, end=g.end) for g in gaps])
 
 
-@router.get("/locations/{location_id}/series", response_model=SeriesOut, tags=["data"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/locations/{location_id}/series", response_model=SeriesOut, tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def series(
     location_id: str, dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
     start: datetime | None = Query(None, description="ISO 8601; default = 48 h ago"),
@@ -202,7 +202,7 @@ def series(
     return _series_out(db, settings, location_id, dataset, start, end)
 
 
-@router.get("/series", response_model=list[SeriesOut], tags=["data"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/series", response_model=list[SeriesOut], tags=["data"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def series_bulk(
     locations: str = Query(..., description="Comma-separated location ids (max 20)"),
     dataset: str = Query(..., description="Dataset key, e.g. wave_height"),
@@ -213,7 +213,7 @@ def series_bulk(
     return [_series_out(db, settings, loc.id, dataset, start, end) for loc in _locs(db, locations)]
 
 
-@router.get("/alerts", response_model=list[AlertOut], tags=["alerts"], dependencies=[Depends(rate_limit("public"))])
+@router.get("/alerts", response_model=list[AlertOut], tags=["alerts"], dependencies=[Depends(rate_limit("public")), Depends(developer_key)])
 def alerts(location_id: str | None = None, include_expired: bool = False,
            status: Literal["active", "expired", "suppressed_stale"] | None = Query(None, description="Filter by derived status"),
            category: AlertCategory | None = Query(None, description="coastal, ocean_navigation or waterway_navigation"),
@@ -224,10 +224,10 @@ def alerts(location_id: str | None = None, include_expired: bool = False,
     for e, derived in events_with_status(db, utcnow(), location_id, include_expired or status == "expired"):
         if status and derived != status:
             continue
-        if category and category_of(e.rule_id) != category:
+        if category and category_for_rule(e.rule) != category:
             continue
         out.append(AlertOut(
-            id=e.id, rule_id=e.rule_id, rule_name=e.rule.name, category=category_of(e.rule_id), location_id=e.location_id,
+            id=e.id, rule_id=e.rule_id, rule_name=e.rule.name, category=category_for_rule(e.rule), location_id=e.location_id,
             zone=zone_of(e.location_id), dataset=e.dataset_key,
             condition=f"{e.dataset_key} {e.operator} {e.threshold:g} {e.unit}", value=e.value, threshold=e.threshold, unit=e.unit,
             data_type=e.data_kind, source_id=e.source_id, source_timestamp=e.triggered_at, issued_at=e.issued_at,
@@ -237,7 +237,9 @@ def alerts(location_id: str | None = None, include_expired: bool = False,
 
 @router.get("/alert-rules", tags=["alerts"])
 def alert_rules(db: Session = Depends(get_db)):
-    return [{"id": r.id, "name": r.name, "category": category_of(r.id), "dataset": r.dataset_key, "condition": f"{r.operator} {r.threshold:g} {r.unit}",
+    return [{"id": r.id, "name": r.name, "category": category_for_rule(r), "zones": r.zones, "dataset": r.dataset_key,
+             "operator": r.operator, "threshold": r.threshold, "unit": r.unit,
+             "condition": f"{r.operator} {r.threshold:g} {r.unit}",
              "suppression_hours": r.suppression_hours, "validity_hours": r.validity_hours, "enabled": r.enabled,
              "review_status": r.review_status} for r in db.scalars(select(AlertRule)).all()]
 
@@ -251,6 +253,7 @@ def feedback(body: FeedbackIn, db: Session = Depends(get_db)):
                     comments=(body.comments or "").strip() or None))
     db.commit()
     return {"status": "received"}
+
 
 
 

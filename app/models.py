@@ -5,7 +5,7 @@ from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base, UTCDateTime, utcnow
-from app.zones import zone_of
+from app.zones import ZONE_OF, zone_of
 
 
 class DataSource(Base):
@@ -29,10 +29,12 @@ class Location(Base):
     area: Mapped[str] = mapped_column(String(200))
     lat: Mapped[float] = mapped_column(Float)
     lng: Mapped[float] = mapped_column(Float)
+    zone_value: Mapped[str] = mapped_column("zone", String(20), default="coastal")
 
     @property
     def zone(self) -> str:
-        return zone_of(self.id)
+        # Existing deployments keep their code-defined zones; new admin-created locations use the stored value.
+        return zone_of(self.id) if self.id in ZONE_OF else (self.zone_value or "coastal")
 
 
 class Dataset(Base):
@@ -95,6 +97,8 @@ class AlertRule(Base):
     operator: Mapped[str] = mapped_column(String(3))  # >= or <=
     threshold: Mapped[float] = mapped_column(Float)
     unit: Mapped[str] = mapped_column(String(20))
+    category: Mapped[str] = mapped_column(String(40), default="coastal")
+    zones: Mapped[list | None] = mapped_column(JSON, nullable=True)
     suppression_hours: Mapped[float] = mapped_column(Float)
     validity_hours: Mapped[float] = mapped_column(Float)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -131,11 +135,14 @@ class AdminUser(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(254), unique=True)
     password_hash: Mapped[str] = mapped_column(String(300))
+    role: Mapped[str] = mapped_column(String(20), default="admin")  # admin | operator | viewer
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    mfa_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AdminSession(Base):
@@ -147,6 +154,129 @@ class AdminSession(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     user: Mapped[AdminUser] = relationship()
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id"))
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ApiKey(Base):
+    """Developer sandbox credential. Only a SHA-256 digest is stored; the raw key is shown once."""
+
+    __tablename__ = "api_keys"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120))
+    prefix: Mapped[str] = mapped_column(String(16), unique=True)
+    key_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    owner_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    environment: Mapped[str] = mapped_column(String(20), default="test")
+    scopes: Mapped[str] = mapped_column(String(120), default="read")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    quota_per_day: Mapped[int] = mapped_column(Integer, default=1000)
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=60)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class ApiUsage(Base):
+    __tablename__ = "api_usage"
+    __table_args__ = (UniqueConstraint("api_key_id", "day", name="uq_api_usage_day"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"))
+    day: Mapped[str] = mapped_column(String(10))  # UTC date, YYYY-MM-DD
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    last_path: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class NotificationTarget(Base):
+    __tablename__ = "notification_targets"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120))
+    channel: Mapped[str] = mapped_column(String(20))  # email | sms | webhook
+    address: Mapped[str] = mapped_column(String(500))
+    event_types: Mapped[str] = mapped_column(String(200), default="alert.created")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("notification_targets.id"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(60))
+    channel: Mapped[str] = mapped_column(String(20))
+    destination: Mapped[str] = mapped_column(String(500))
+    subject: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued | sent | failed | skipped
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Job(Base):
+    """Durable job queue. Workers take rows with FOR UPDATE SKIP LOCKED so several workers can run safely."""
+
+    __tablename__ = "jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued | running | success | failed
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class Vessel(Base):
+    __tablename__ = "vessels"
+    mmsi: Mapped[str] = mapped_column(String(9), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    flag: Mapped[str] = mapped_column(String(60), default="Nigeria")
+    vessel_type: Mapped[str] = mapped_column(String(60), default="cargo")
+    call_sign: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class VesselPosition(Base):
+    __tablename__ = "vessel_positions"
+    __table_args__ = (UniqueConstraint("mmsi", "observed_at", name="uq_vessel_position"),
+                      Index("ix_vessel_position_lookup", "mmsi", "observed_at"))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mmsi: Mapped[str] = mapped_column(ForeignKey("vessels.mmsi"))
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    lat: Mapped[float] = mapped_column(Float)
+    lng: Mapped[float] = mapped_column(Float)
+    sog: Mapped[float] = mapped_column(Float, default=0.0)  # speed over ground, knots
+    cog: Mapped[float] = mapped_column(Float, default=0.0)  # course over ground, degrees
+    heading: Mapped[float | None] = mapped_column(Float, nullable=True)
+    nav_status: Mapped[str] = mapped_column(String(40), default="under_way")
+    source: Mapped[str] = mapped_column(String(60), default="demo-ais")
+    vessel: Mapped[Vessel] = relationship()
+
+
+class BathymetryPoint(Base):
+    __tablename__ = "bathymetry_points"
+    __table_args__ = (UniqueConstraint("lat", "lng", name="uq_bathymetry_point"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lng: Mapped[float] = mapped_column(Float)
+    depth_m: Mapped[float] = mapped_column(Float)
+    survey_name: Mapped[str] = mapped_column(String(120), default="Lagos shelf demo survey")
+    source: Mapped[str] = mapped_column(String(60), default="demo-bathymetry")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class Feedback(Base):

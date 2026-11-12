@@ -15,10 +15,33 @@ class Settings(BaseSettings):
     admin_api_key: str = ""  # optional service key for automation; staff sign in with accounts instead
     admin_bootstrap_email: str = ""  # creates the first administrator when none exist
     admin_bootstrap_password: str = ""
+    admin_bootstrap_role: str = "admin"
     admin_session_hours: int = 8
     admin_max_failed_logins: int = 5
     admin_lockout_minutes: int = 15
     login_rate_limit_per_minute: int = 10
+    password_reset_hours: int = 1
+    public_base_url: str = "http://localhost:5173"
+
+    developer_key_quota_per_day: int = 1000
+    developer_key_rate_per_minute: int = 60
+    developer_keys_per_hour: int = 5
+
+    jobs_enabled: bool = True
+    job_poll_seconds: int = 30
+
+    notifications_enabled: bool = True
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "alerts@orizon-nimasa.local"
+    smtp_use_tls: bool = True
+    webhook_timeout_seconds: float = 10.0
+
+    ais_provider: str = "demo"  # provider-ready id; live AIS credentials are not bundled
+    bathymetry_provider: str = "demo"
+    tide_provider: str = "harmonic-demo"
 
     active_source: str = "demo"
     source_licence_reviewed: bool = False

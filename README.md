@@ -18,6 +18,18 @@ Built with Python 3.11+ (the Docker image uses 3.12), FastAPI, SQLAlchemy 2, Pos
 
 ---
 
+## Platform features
+
+Beyond the original map/chart API, this build adds:
+
+- **Role-based staff access** (`admin`, `operator`, `viewer`), TOTP MFA, single-use password-reset tokens and session revocation.
+- **Full admin CRUD** for sources, datasets, alert rules, locations, API keys, notification targets, staff and durable jobs. Every change is audited.
+- **Developer sandbox** at `/api/v1/developer/*`: self-service keys (one shown once, SHA-256 at rest), per-key daily quota metering and rate limits, plus copy-ready cURL/JavaScript recipes.
+- **Notification outbox** with email (SMTP), webhook and SMS-ready targets, retries, delivery status and an admin test button.
+- **Durable job queue** using PostgreSQL `FOR UPDATE SKIP LOCKED` for ingestion, notification dispatch, retention and quality scans.
+- **Marine endpoints** at `/api/v1/vessels`, `/vessels/{mmsi}/track`, `/bathymetry`, `/tides` and `/data-quality`. Demo AIS, bathymetry and harmonic tides are synthetic and labelled as such; no real provider credentials are bundled.
+- **Data-quality scoring** based on freshness, observations, rejected runs, active alerts, gaps and completeness.
+
 ## What it serves
 
 ### Coverage
@@ -128,13 +140,13 @@ curl "localhost:8015/api/v1/summaries?locations=lekki"
 DATABASE_URL=postgres://.../blueintel_dev?sslmode=require
 TEST_DATABASE_URL=postgres://.../blueintel_test?sslmode=require
 
-pytest        # 74 tests, no external network calls
+pytest        # 96 tests, no external network calls
 ```
 
 - **Both URLs are required.** The app is created when `app.main` is imported, so `pytest` fails at start-up if `DATABASE_URL` is missing, even though the tests themselves use `TEST_DATABASE_URL`.
 - **Every test starts by dropping all tables.** `pytest` therefore refuses to run unless the test database name ends in `_test` and differs from `DATABASE_URL`.
 - Groq is replaced by a fake client and the Open-Meteo adapter is not exercised, so no test touches an external service.
-- On a local PostgreSQL the suite takes under two minutes. Against a remote host expect longer, because each test resets the database over the network.
+- On a local PostgreSQL the suite takes a few minutes. Against a remote host expect longer, because each test resets the database over the network.
 
 ---
 
@@ -146,7 +158,7 @@ All settings come from environment variables or `.env` (see `.env.example`). Inl
 |---|---|---|
 | `APP_ENV` | `development` | Set to `production` to enable HSTS and the strict service-key length check. |
 | `LOG_LEVEL` | `INFO` | Logs are JSON, one object per line, on stdout. |
-| `CORS_ORIGINS` | `http://localhost:5173` | Allowed front-end origins. Methods allowed: GET, POST, PATCH. |
+| `CORS_ORIGINS` | `http://localhost:5173` | Allowed front-end origins. Methods allowed: GET, POST, PATCH, DELETE. |
 | `DATABASE_URL` | none, **required** | PostgreSQL URL. Non-PostgreSQL URLs are rejected at start-up. |
 | `TEST_DATABASE_URL` | none | Used only by `pytest`. Must end in `_test`. |
 | `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_BOOTSTRAP_PASSWORD` | empty | First administrator, created only if no administrators exist. |
@@ -166,8 +178,14 @@ All settings come from environment variables or `.env` (see `.env.example`). Inl
 | `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_BASE_URL`, `GROQ_TIMEOUT_SECONDS` | empty, `llama-3.3-70b-versatile`, Groq URL, `20` | Check Groq's current model list, as models are retired over time. |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Per IP, for public data endpoints and feedback. |
 | `INSIGHTS_RATE_LIMIT_PER_MINUTE` | `6` | Per IP, for the AI endpoint. |
-| `MAX_SERIES_DAYS` | `14` | Longest time range per series request. Supported but not listed in `.env.example`. |
-| `ALERT_LOOKBACK_HOURS` | `72` | How far back alert evaluation looks. Supported but not listed in `.env.example`. |
+| `MAX_SERIES_DAYS` | `14` | Longest time range per series request. |
+| `ALERT_LOOKBACK_HOURS` | `72` | How far back alert evaluation looks. |
+| `ADMIN_BOOTSTRAP_ROLE` | `admin` | Role of the first account: admin, operator or viewer. |
+| `PUBLIC_BASE_URL` / `PASSWORD_RESET_HOURS` | `http://localhost:5173` / `1` | Password-reset link origin and token lifetime. |
+| `DEVELOPER_KEY_*` | `1000`/`60`/`5` | Sandbox key daily quota, per-minute limit and per-IP hourly creation limit. |
+| `JOBS_ENABLED` / `JOB_POLL_SECONDS` | `true` / `30` | Durable job worker schedule. |
+| `NOTIFICATIONS_ENABLED` / `SMTP_*` / `WEBHOOK_TIMEOUT_SECONDS` | enabled / empty / `10` | Notification outbox delivery. Real SMS/webhook credentials are not bundled. |
+| `AIS_PROVIDER` / `BATHYMETRY_PROVIDER` / `TIDE_PROVIDER` | `demo` / `demo` / `harmonic-demo` | Provider-ready marine adapters. Demo data is synthetic and not for navigation. |
 
 ---
 
@@ -359,14 +377,17 @@ blueintel-api/
 │   ├── zones.py         location zones and which rules apply where
 │   ├── seed.py          sources, locations, datasets, alert rules, first admin
 │   ├── dbcheck.py       python -m app.dbcheck
-│   ├── routers/         public.py · auth.py · admin.py · insights.py
-│   └── services/        adapters.py · ingestion.py · alerts.py · data.py · export.py · insights.py · llm.py
+│   ├── routers/         public.py · auth.py · admin.py · insights.py · marine.py · developer.py
+│   ├── services/        adapters.py · ingestion.py · alerts.py · data.py · export.py · insights.py · llm.py
+│   │                     api_keys.py · notifications.py · jobs.py · quality.py
+│   ├── totp.py          RFC 6238 MFA helpers
+│   ├── schema_upgrade.py additive, idempotent DDL for existing databases
 ├── docs/FRONTEND_API.md front-end integration guide
-├── tests/               74 tests (alerts, API, auth, ingestion, insights)
+├── tests/               96 tests (alerts, API, platform/admin, auth, ingestion, insights)
 └── .env.example · requirements.txt · requirements-dev.txt · Dockerfile
 ```
 
-Tables (created by `create_all`): `data_sources`, `locations`, `datasets`, `ingestion_runs`, `observations`, `alert_rules`, `alert_events`, `admin_users`, `admin_sessions`, `feedback`, `audit_log`, `insight_logs`.
+Tables (created by `create_all`): `data_sources`, `locations`, `datasets`, `ingestion_runs`, `observations`, `alert_rules`, `alert_events`, `admin_users`, `admin_sessions`, `password_reset_tokens`, `feedback`, `audit_log`, `insight_logs`, `api_keys`, `api_usage`, `notification_targets`, `notifications`, `jobs`, `vessels`, `vessel_positions`, `bathymetry_points`.
 
 ---
 
@@ -406,3 +427,4 @@ docker run -p 8015:8015 \
 | Not implemented | FR-016 (email/SMS/push, optional in the MVP) · public user accounts (PRD 14.2: the public needs no login) |
 
 Freshness thresholds (FR-024) are admin-configurable. Security controls include secrets in environment variables, validated input, parameterised queries, rate limits, admin authentication and no secrets in logs.
+
